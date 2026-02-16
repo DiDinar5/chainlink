@@ -62,6 +62,24 @@ describe("PassStore MVP", function () {
     await expect(claimDrop.connect(user).claim()).to.emit(claimDrop, "Claimed");
   });
 
+  it("treats expiration=0 as non-expiring when policy requires unexpired", async () => {
+    const { user, issuer, registry } = await deployFixture();
+
+    await (
+      await registry.connect(issuer).attest(user.address, {
+        flags: 1n,
+        expiration: 0n,
+        riskScore: 10,
+        subjectType: 1,
+        refHash: ethers.ZeroHash
+      })
+    ).wait();
+
+    const result = await registry.verifyUser(user.address, 0n);
+    expect(result[0]).to.equal(true);
+    expect(result[1]).to.equal(0n);
+  });
+
   it("blocks after revoke", async () => {
     const { user, issuer, registry, accessPass } = await deployFixture();
 
@@ -104,6 +122,35 @@ describe("PassStore MVP", function () {
     await expect(
       broker.connect(user).requestWorldIdVerification("proof-data", "root-data", "nullifier-data", "device")
     ).to.emit(broker, "WorldIdVerificationRequested");
+  });
+
+  it("enforces predictable packet overwrite rules", async () => {
+    const { user, issuer, broker } = await deployFixture();
+
+    await (await broker.connect(user).setEncryptionPubKey("0x11223344")).wait();
+    await (await broker.connect(user).requestKyc("basic-kyc")).wait();
+
+    const requestId = await broker.latestKycRequestId(user.address);
+    const now = BigInt((await ethers.provider.getBlock("latest"))?.timestamp ?? 0);
+
+    await expect(broker.connect(issuer).storeEncryptedToken(requestId, "0x", now + 60n)).to.be.revertedWith(
+      "KycSessionBroker: empty ciphertext"
+    );
+
+    await expect(
+      broker.connect(issuer).storeEncryptedToken(requestId, "0x1122", now)
+    ).to.be.revertedWith("KycSessionBroker: invalid expiresAt");
+
+    await expect(broker.connect(issuer).storeEncryptedToken(requestId, "0x1122", now + 60n)).to.emit(
+      broker,
+      "TokenStored"
+    );
+
+    await (await broker.connect(user).markConsumed(requestId)).wait();
+
+    await expect(
+      broker.connect(issuer).storeEncryptedToken(requestId, "0x3344", now + 120n)
+    ).to.be.revertedWith("KycSessionBroker: packet consumed");
   });
 
   it("enforces KYB only after active KYC", async () => {

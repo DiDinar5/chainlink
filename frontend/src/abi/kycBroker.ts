@@ -11,6 +11,8 @@ export const kycBrokerAbi = [
   "function requestWorldIdVerification(string proof, string merkleRoot, string nullifierHash, string verificationLevel) returns (uint256 worldIdRequestId)",
   "function requestKyb(string companyRef, string jurisdiction) returns (uint256 kybRequestId)",
   "function requestAssetVerification(uint256 kybRequestId, uint256 chainId, address tokenAddress, uint256 tokenId, uint8 tokenStandard, string symbolOrName, bytes32 metadataHash, string metadataURI) returns (uint256 assetRequestId)",
+  "function latestKycRequestId(address user) view returns (uint256)",
+  "function hasKycRequest(address user) view returns (bool)",
   "function latestKybRequestId(address user) view returns (uint256)",
   "function hasKybRequest(address user) view returns (bool)",
   "function getPacket(uint256 requestId) view returns (address user, bytes ciphertext, uint64 expiresAt, bool consumed, bool exists)",

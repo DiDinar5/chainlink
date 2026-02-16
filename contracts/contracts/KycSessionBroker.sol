@@ -214,6 +214,9 @@ contract KycSessionBroker {
         TokenPacket storage packet = packets[requestId];
         require(packet.exists, "KycSessionBroker: request missing");
         require(packet.user != address(0), "KycSessionBroker: user missing");
+        require(!packet.consumed, "KycSessionBroker: packet consumed");
+        require(ciphertext.length > 0, "KycSessionBroker: empty ciphertext");
+        require(expiresAt == 0 || expiresAt > block.timestamp, "KycSessionBroker: invalid expiresAt");
 
         packet.ciphertext = ciphertext;
         packet.expiresAt = expiresAt;

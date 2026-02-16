@@ -214,7 +214,7 @@ contract PassRegistry {
             return (false, REASON_REVOKED);
         }
 
-        if (policy.requireUnexpired && (a.expiration == 0 || a.expiration < block.timestamp)) {
+        if (policy.requireUnexpired && a.expiration != 0 && a.expiration < block.timestamp) {
             return (false, REASON_EXPIRED);
         }
 

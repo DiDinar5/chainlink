@@ -43,6 +43,8 @@ type SumsubStatusSnapshot = {
   reviewAnswer: string;
 };
 
+type SdkPacketStage = "idle" | "requested" | "token_ready" | "consumed";
+
 type KybStubStatus = "not_started" | "in_review" | "verified";
 
 type TokenStandard = "ERC20" | "ERC721" | "ERC1155";
@@ -769,6 +771,8 @@ export default function App() {
   const [error, setError] = useState<string>("");
   const [requestId, setRequestId] = useState<string>("-");
   const [sdkTokenPreview, setSdkTokenPreview] = useState<string>("-");
+  const [sdkPacketStage, setSdkPacketStage] = useState<SdkPacketStage>("idle");
+  const [sdkPacketExpiresAt, setSdkPacketExpiresAt] = useState<number>(0);
   const [verify, setVerify] = useState<VerifySnapshot>({ ok: false, reason: 1 });
   const [attestation, setAttestation] = useState<AttestationSnapshot | null>(null);
   const [encryptionReady, setEncryptionReady] = useState<boolean>(false);
@@ -831,6 +835,10 @@ export default function App() {
         setPendingDecrypt(null);
         setEncryptionReady(false);
         setSumsubModalOpen(false);
+        setRequestId("-");
+        setSdkTokenPreview("-");
+        setSdkPacketStage("idle");
+        setSdkPacketExpiresAt(0);
         setWorldIdVerified(false);
         setKybStubStatus("not_started");
         setKybCompanyProfile(null);
@@ -853,6 +861,10 @@ export default function App() {
       setPendingDecrypt(null);
       setEncryptionReady(false);
       setSumsubModalOpen(false);
+      setRequestId("-");
+      setSdkTokenPreview("-");
+      setSdkPacketStage("idle");
+      setSdkPacketExpiresAt(0);
       setWorldIdVerified(false);
       setHasKybRequest(false);
       setLatestKybRequestId("-");
@@ -869,6 +881,10 @@ export default function App() {
       setKybCompanyProfile(null);
       setRegistryQueue([]);
       setVerifiedAssets([]);
+      setRequestId("-");
+      setSdkTokenPreview("-");
+      setSdkPacketStage("idle");
+      setSdkPacketExpiresAt(0);
       return;
     }
 
@@ -1215,12 +1231,22 @@ export default function App() {
 
     const { registry, broker } = makeContracts(activeProvider);
 
-    const [verifyResult, attResult, pubKeyHex, hasKybRequestOnchain, latestKybRequestIdOnchain] = await Promise.all([
+    const [
+      verifyResult,
+      attResult,
+      pubKeyHex,
+      hasKybRequestOnchain,
+      latestKybRequestIdOnchain,
+      hasKycRequestOnchain,
+      latestKycRequestIdOnchain
+    ] = await Promise.all([
       registry.verifyUser(user, env.policyId),
       registry.attestations(user),
       broker.encryptionPubKey(user),
       broker.hasKybRequest(user),
-      broker.latestKybRequestId(user)
+      broker.latestKybRequestId(user),
+      broker.hasKycRequest(user),
+      broker.latestKycRequestId(user)
     ]);
 
     const verifySnapshot = { ok: Boolean(verifyResult[0]), reason: Number(verifyResult[1]) };
@@ -1239,6 +1265,32 @@ export default function App() {
     setWorldIdVerified(isWorldIdLinked);
     setHasKybRequest(Boolean(hasKybRequestOnchain));
     setLatestKybRequestId(Boolean(hasKybRequestOnchain) ? (latestKybRequestIdOnchain as bigint).toString() : "-");
+
+    let normalizedRequestId = "-";
+    let nextSdkPacketStage: SdkPacketStage = "idle";
+    let nextSdkPacketExpiresAt = 0;
+
+    if (Boolean(hasKycRequestOnchain)) {
+      normalizedRequestId = (latestKycRequestIdOnchain as bigint).toString();
+      const packet = await broker.getPacket(latestKycRequestIdOnchain);
+      const ciphertextHex = packet[1] as string;
+      const expiresAt = Number(packet[2]);
+      const consumed = Boolean(packet[3]);
+      const exists = Boolean(packet[4]);
+
+      nextSdkPacketExpiresAt = expiresAt;
+      if (consumed) {
+        nextSdkPacketStage = "consumed";
+      } else if (ciphertextHex !== "0x") {
+        nextSdkPacketStage = "token_ready";
+      } else if (exists) {
+        nextSdkPacketStage = "requested";
+      }
+    }
+
+    setRequestId(normalizedRequestId);
+    setSdkPacketStage(nextSdkPacketStage);
+    setSdkPacketExpiresAt(nextSdkPacketExpiresAt);
 
     const hasOnchainEncryptionKey = pubKeyHex !== "0x";
     const localSessionSecret =
@@ -1607,12 +1659,40 @@ export default function App() {
 
     setSdkTokenPreview(preview);
     setPendingDecrypt(null);
+    setSdkPacketStage("token_ready");
+    setSdkPacketExpiresAt(packet.expiresAt);
+
+    let packetConsumedOnchain = false;
+    try {
+      const { signer } = await getActiveSignerAndAddress();
+      const { broker } = makeContracts(signer);
+      const consumeTx = await broker.markConsumed(BigInt(packet.requestId));
+      await consumeTx.wait();
+      packetConsumedOnchain = true;
+      setSdkPacketStage("consumed");
+    } catch (consumeErr) {
+      const message = (consumeErr as Error).message;
+      if (message.includes("KycSessionBroker: already consumed")) {
+        packetConsumedOnchain = true;
+        setSdkPacketStage("consumed");
+      } else {
+        console.warn("Failed to mark SDK packet consumed", consumeErr);
+      }
+    }
 
     if (isMockToken) {
       setSumsubModalOpen(false);
-      setStatus("Demo mode: KYC mock accepted. Press Check status to sync onchain state.");
+      setStatus(
+        packetConsumedOnchain
+          ? "Demo mode: KYC mock accepted. SDK packet consumed onchain. Press Check status to sync onchain state."
+          : "Demo mode: KYC mock accepted. SDK packet still token-ready. Press Check status to sync onchain state."
+      );
     } else {
-      setStatus(`SDK token decrypted (expiresAt=${packet.expiresAt}), launching Sumsub...`);
+      setStatus(
+        packetConsumedOnchain
+          ? `SDK token consumed onchain (expiresAt=${packet.expiresAt}), launching Sumsub...`
+          : `SDK token decrypted (expiresAt=${packet.expiresAt}), launching Sumsub...`
+      );
       launchSumsub(decryptedToken);
       setStatus("Sumsub started. Complete verification and then press Check status.");
     }
@@ -1652,6 +1732,8 @@ export default function App() {
 
     setRequestId(newRequestId.toString());
     setSdkTokenPreview("-");
+    setSdkPacketStage("requested");
+    setSdkPacketExpiresAt(0);
     setPendingDecrypt(null);
     setWaitingPacket(true);
     setStatus(`KYC request submitted (#${newRequestId.toString()}). Waiting for CRE packet...`);
@@ -1666,6 +1748,8 @@ export default function App() {
           owner: address
         };
 
+        setSdkPacketStage("token_ready");
+        setSdkPacketExpiresAt(packet.expiresAt);
         setPendingDecrypt(pendingPacket);
         setStatus("Encrypted SDK token received. Decrypting locally...");
         await autoDecryptAndLaunch(pendingPacket, sessionSecretHex);
@@ -2231,6 +2315,15 @@ export default function App() {
   const networkMismatch = chainId > 0 && expectedChainId > 0 && chainId !== expectedChainId;
   const worldIdConfigured = Boolean(env.worldIdAppId && env.worldIdAction);
   const hasSdkToken = sdkTokenPreview !== "-";
+  const sdkPacketStageLabel =
+    sdkPacketStage === "token_ready"
+      ? "token ready"
+      : sdkPacketStage === "requested"
+        ? "requested"
+        : sdkPacketStage === "consumed"
+          ? "consumed"
+          : "idle";
+  const sdkPacketExpiryLabel = sdkPacketExpiresAt > 0 ? formatUnixTimestamp(sdkPacketExpiresAt) : "-";
   const worldIdVerificationLevel = parseWorldIdVerificationLevel(env.worldIdVerificationLevel);
   const worldIdPrecheckMode = parseWorldIdPrecheckMode(env.worldIdPrecheckMode);
 
@@ -2316,6 +2409,8 @@ export default function App() {
 
           <div className="meta-row">
             <span>Request ID: {requestId}</span>
+            <span>SDK packet: {sdkPacketStageLabel}</span>
+            <span>Packet exp: {sdkPacketExpiryLabel}</span>
             <span>SDK token: {sdkTokenPreview}</span>
             <span>
               CRE issuer: {creIssuerAllowed === null ? "-" : creIssuerAllowed ? "allowed" : "not allowed"}
