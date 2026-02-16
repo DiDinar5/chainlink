@@ -14,12 +14,16 @@ contract KycSessionBroker {
     uint256 public nextRequestId;
     uint256 public nextSyncRequestId;
     uint256 public nextWorldIdRequestId;
+    uint256 public nextKybRequestId;
+    uint256 public nextAssetRequestId;
     uint64 public syncCooldown;
 
     mapping(address => bool) public isIssuer;
     mapping(address => bytes) public encryptionPubKey;
     mapping(address => bool) public hasKycRequest;
     mapping(address => uint256) public latestKycRequestId;
+    mapping(address => bool) public hasKybRequest;
+    mapping(address => uint256) public latestKybRequestId;
     mapping(address => uint64) public lastSyncRequestAt;
     mapping(uint256 => TokenPacket) private packets;
 
@@ -32,6 +36,24 @@ contract KycSessionBroker {
         address indexed user,
         string nullifierHash,
         string verificationLevel
+    );
+    event KybRequested(
+        uint256 indexed kybRequestId,
+        address indexed user,
+        string companyRef,
+        string jurisdiction
+    );
+    event AssetVerificationRequested(
+        uint256 indexed assetRequestId,
+        uint256 indexed kybRequestId,
+        address indexed user,
+        uint256 chainId,
+        address tokenAddress,
+        uint256 tokenId,
+        uint8 tokenStandard,
+        string symbolOrName,
+        bytes32 metadataHash,
+        string metadataURI
     );
     event TokenStored(uint256 indexed requestId, address indexed user, uint64 expiresAt);
     event TokenConsumed(uint256 indexed requestId, address indexed user);
@@ -119,6 +141,68 @@ contract KycSessionBroker {
             msg.sender,
             nullifierHash,
             verificationLevel
+        );
+    }
+
+    function requestKyb(
+        string calldata companyRef,
+        string calldata jurisdiction
+    ) external returns (uint256 kybRequestId) {
+        require(bytes(companyRef).length > 0, "KycSessionBroker: empty company ref");
+        require(hasKycRequest[msg.sender], "KycSessionBroker: kyc required");
+
+        kybRequestId = nextKybRequestId;
+        nextKybRequestId = kybRequestId + 1;
+
+        hasKybRequest[msg.sender] = true;
+        latestKybRequestId[msg.sender] = kybRequestId;
+
+        emit KybRequested(kybRequestId, msg.sender, companyRef, jurisdiction);
+    }
+
+    function requestAssetVerification(
+        uint256 kybRequestId,
+        uint256 chainId,
+        address tokenAddress,
+        uint256 tokenId,
+        uint8 tokenStandard,
+        string calldata symbolOrName,
+        bytes32 metadataHash,
+        string calldata metadataURI
+    ) external returns (uint256 assetRequestId) {
+        require(hasKybRequest[msg.sender], "KycSessionBroker: kyb required");
+        require(latestKybRequestId[msg.sender] >= kybRequestId, "KycSessionBroker: kyb request missing");
+        require(chainId > 0, "KycSessionBroker: invalid chain");
+        require(tokenStandard > 0 && tokenStandard <= 4, "KycSessionBroker: invalid token standard");
+        require(bytes(symbolOrName).length > 0, "KycSessionBroker: empty symbol/name");
+        require(
+            metadataHash != bytes32(0) || bytes(metadataURI).length > 0,
+            "KycSessionBroker: metadata required"
+        );
+
+        if (tokenStandard <= 3) {
+            require(tokenAddress != address(0), "KycSessionBroker: token address required");
+        }
+
+        // ERC20 registrations do not use tokenId.
+        if (tokenStandard == 1) {
+            require(tokenId == 0, "KycSessionBroker: tokenId must be zero for ERC20");
+        }
+
+        assetRequestId = nextAssetRequestId;
+        nextAssetRequestId = assetRequestId + 1;
+
+        emit AssetVerificationRequested(
+            assetRequestId,
+            kybRequestId,
+            msg.sender,
+            chainId,
+            tokenAddress,
+            tokenId,
+            tokenStandard,
+            symbolOrName,
+            metadataHash,
+            metadataURI
         );
     }
 

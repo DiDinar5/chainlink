@@ -1,5 +1,5 @@
 import { Contract, JsonRpcProvider, Wallet } from "ethers";
-import { BROKER_ABI, REGISTRY_ABI } from "../abi.js";
+import { ASSET_REGISTRY_ABI, BROKER_ABI, REGISTRY_ABI } from "../abi.js";
 import { config } from "../config.js";
 
 const provider = new JsonRpcProvider(config.rpcUrl);
@@ -19,4 +19,8 @@ export function getBroker() {
 
 export function getRegistry() {
   return new Contract(config.registryAddress, REGISTRY_ABI, wallet);
+}
+
+export function getAssetRegistry() {
+  return new Contract(config.assetRegistryAddress, ASSET_REGISTRY_ABI, wallet);
 }

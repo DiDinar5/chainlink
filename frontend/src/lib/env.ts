@@ -22,6 +22,7 @@ export const env = {
   kycLevelName: (import.meta.env.VITE_KYC_LEVEL_NAME as string | undefined) ?? "basic-kyc",
   passRegistry: requireEnv("VITE_PASS_REGISTRY"),
   kycBroker: requireEnv("VITE_KYC_BROKER"),
+  assetRegistry: requireEnv("VITE_ASSET_REGISTRY"),
   accessPass: requireEnv("VITE_ACCESS_PASS"),
   claimDrop: requireEnv("VITE_CLAIM_DROP"),
   creIssuer: import.meta.env.VITE_CRE_ISSUER as string | undefined,

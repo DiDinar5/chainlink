@@ -1,11 +1,13 @@
 import { EventLog, ethers } from "ethers";
 import { BROKER_ABI } from "../abi.js";
-import { getBroker, getProvider, getRegistry } from "../clients/chain.js";
+import { getAssetRegistry, getBroker, getProvider, getRegistry } from "../clients/chain.js";
 import { encryptForSessionKey } from "../clients/crypto.js";
 import { generateSdkToken, getReviewStatusByUserId } from "../clients/sumsub.js";
 import { config } from "../config.js";
 import { readState, writeState } from "../state.js";
 import {
+  AssetVerificationRequestEventData,
+  KybRequestEventData,
   KycRequestEventData,
   KycSyncRequestEventData,
   ReviewDecision,
@@ -111,6 +113,55 @@ async function readWorldIdRequests(fromBlock: number, toBlock: number): Promise<
     user: log.args?.user as string,
     nullifierHash: (log.args?.nullifierHash as string) || "",
     verificationLevel: (log.args?.verificationLevel as string) || "",
+    txHash: log.transactionHash,
+    blockNumber: log.blockNumber
+  }));
+}
+
+async function readKybRequests(fromBlock: number, toBlock: number): Promise<KybRequestEventData[]> {
+  if (fromBlock > toBlock) {
+    return [];
+  }
+
+  const broker = getBroker();
+  const filter = broker.filters.KybRequested();
+  const logs = await broker.queryFilter(filter, fromBlock, toBlock);
+  const eventLogs = logs.filter((log): log is EventLog => "args" in log);
+
+  return eventLogs.map((log) => ({
+    kybRequestId: log.args?.kybRequestId as bigint,
+    user: log.args?.user as string,
+    companyRef: (log.args?.companyRef as string) || "",
+    jurisdiction: (log.args?.jurisdiction as string) || "",
+    txHash: log.transactionHash,
+    blockNumber: log.blockNumber
+  }));
+}
+
+async function readAssetVerificationRequests(
+  fromBlock: number,
+  toBlock: number
+): Promise<AssetVerificationRequestEventData[]> {
+  if (fromBlock > toBlock) {
+    return [];
+  }
+
+  const broker = getBroker();
+  const filter = broker.filters.AssetVerificationRequested();
+  const logs = await broker.queryFilter(filter, fromBlock, toBlock);
+  const eventLogs = logs.filter((log): log is EventLog => "args" in log);
+
+  return eventLogs.map((log) => ({
+    assetRequestId: log.args?.assetRequestId as bigint,
+    kybRequestId: log.args?.kybRequestId as bigint,
+    user: log.args?.user as string,
+    chainId: log.args?.chainId as bigint,
+    tokenAddress: log.args?.tokenAddress as string,
+    tokenId: log.args?.tokenId as bigint,
+    tokenStandard: Number(log.args?.tokenStandard),
+    symbolOrName: (log.args?.symbolOrName as string) || "",
+    metadataHash: (log.args?.metadataHash as string) || ethers.ZeroHash,
+    metadataURI: (log.args?.metadataURI as string) || "",
     txHash: log.transactionHash,
     blockNumber: log.blockNumber
   }));
@@ -313,6 +364,144 @@ async function applyDecision(user: string, decision: ReviewDecision): Promise<vo
   console.log(`user=${user} still pending`);
 }
 
+async function upsertKybAttestation(user: string, kybRequestId: bigint): Promise<{ alreadyVerified: boolean; txHash?: string }> {
+  const registry = getRegistry();
+  const current = await registry.attestations(user);
+  const now = Math.floor(Date.now() / 1000);
+
+  const currentFlags = BigInt(current[0]);
+  const currentExpiration = Number(current[1]);
+  const currentRiskScore = Number(current[2]);
+  const currentSubjectType = Number(current[3]);
+  const currentRevoked = Boolean(current[6]);
+  const currentExists = Boolean(current[7]);
+  const hasKyb = (currentFlags & config.flagKyb) === config.flagKyb;
+
+  if (currentExists && !currentRevoked && hasKyb && currentExpiration > now) {
+    return { alreadyVerified: true };
+  }
+
+  const nextFlags = currentFlags | config.flagHuman | config.flagKyb;
+  const fallbackExpiration = now + config.attestationExpirationDays * 24 * 60 * 60;
+  const nextExpiration = BigInt(Math.max(currentExpiration, fallbackExpiration));
+  const refHash = ethers.keccak256(
+    ethers.toUtf8Bytes(`kyb:${user.toLowerCase()}:${kybRequestId.toString()}:${Date.now()}`)
+  );
+
+  const tx = await registry.attest(user, {
+    flags: nextFlags,
+    expiration: nextExpiration,
+    riskScore: currentRiskScore > 0 ? currentRiskScore : 0,
+    subjectType: currentSubjectType > 0 ? currentSubjectType : 1,
+    refHash
+  });
+  await tx.wait();
+
+  return { alreadyVerified: false, txHash: tx.hash };
+}
+
+async function processKybEvent(event: KybRequestEventData): Promise<void> {
+  const result = await upsertKybAttestation(event.user, event.kybRequestId);
+  if (result.alreadyVerified) {
+    console.log(`kyb requestId=${event.kybRequestId.toString()} user=${event.user} already has kyb flag`);
+    return;
+  }
+
+  console.log(`kyb verified requestId=${event.kybRequestId.toString()} user=${event.user} tx=${result.txHash ?? "n/a"}`);
+}
+
+async function runKybPass(latestBlock: number): Promise<void> {
+  const state = readState();
+  const fromBlock = resolveFromBlock(state.lastKybBlock, latestBlock, "KybVerify");
+
+  if (fromBlock > latestBlock) {
+    state.lastKybBlock = latestBlock;
+    writeState(state);
+    return;
+  }
+
+  const events = await readKybRequests(fromBlock, latestBlock);
+
+  for (const event of events) {
+    try {
+      await processKybEvent(event);
+    } catch (err) {
+      console.error(
+        `KYB verification failed kybRequestId=${event.kybRequestId.toString()} user=${event.user} tx=${event.txHash}`,
+        err
+      );
+    }
+  }
+
+  state.lastKybBlock = latestBlock;
+  writeState(state);
+}
+
+async function processAssetVerificationEvent(event: AssetVerificationRequestEventData): Promise<void> {
+  const assetRegistry = getAssetRegistry();
+
+  const assetKey = (await assetRegistry.computeAssetKey(
+    event.chainId,
+    event.tokenAddress,
+    event.tokenId,
+    event.tokenStandard
+  )) as string;
+
+  const current = await assetRegistry.assets(assetKey);
+  const exists = Boolean(current[12]);
+  const revoked = Boolean(current[11]);
+  const owner = (current[0] as string).toLowerCase();
+
+  if (exists && !revoked && owner === event.user.toLowerCase()) {
+    console.log(`asset requestId=${event.assetRequestId.toString()} user=${event.user} already verified key=${assetKey}`);
+    return;
+  }
+
+  const tx = await assetRegistry.verifyAsset(
+    event.user,
+    event.chainId,
+    event.tokenAddress,
+    event.tokenId,
+    event.tokenStandard,
+    event.symbolOrName,
+    event.metadataHash,
+    event.metadataURI,
+    event.kybRequestId
+  );
+  await tx.wait();
+
+  console.log(
+    `asset verified requestId=${event.assetRequestId.toString()} user=${event.user} key=${assetKey} tx=${tx.hash}`
+  );
+}
+
+async function runAssetVerificationPass(latestBlock: number): Promise<void> {
+  const state = readState();
+  const fromBlock = resolveFromBlock(state.lastAssetBlock, latestBlock, "AssetVerify");
+
+  if (fromBlock > latestBlock) {
+    state.lastAssetBlock = latestBlock;
+    writeState(state);
+    return;
+  }
+
+  const events = await readAssetVerificationRequests(fromBlock, latestBlock);
+
+  for (const event of events) {
+    try {
+      await processAssetVerificationEvent(event);
+    } catch (err) {
+      console.error(
+        `Asset verification failed assetRequestId=${event.assetRequestId.toString()} user=${event.user} tx=${event.txHash}`,
+        err
+      );
+    }
+  }
+
+  state.lastAssetBlock = latestBlock;
+  writeState(state);
+}
+
 async function runSyncKycStatusPass(latestBlock: number): Promise<void> {
   const state = readState();
   const fromBlock = resolveFromBlock(state.lastSyncBlock, latestBlock, "SyncKycStatus");
@@ -435,6 +624,8 @@ async function runOnce(): Promise<void> {
   await runIssueSdkTokenPass(latest);
   await runSyncKycStatusPass(latest);
   await runWorldIdPass(latest);
+  await runKybPass(latest);
+  await runAssetVerificationPass(latest);
 }
 
 async function main() {
@@ -444,7 +635,7 @@ async function main() {
   }
 
   console.log(
-    `Unified CRE worker started with loopInterval=${config.pollIntervalMs}ms (KYC sync + World ID are event-driven)`
+    `Unified CRE worker started with loopInterval=${config.pollIntervalMs}ms (KYC, World ID, KYB and Asset verification are event-driven)`
   );
 
   while (true) {
@@ -456,6 +647,8 @@ async function main() {
       await runIssueSdkTokenPass(latest);
       await runSyncKycStatusPass(latest);
       await runWorldIdPass(latest);
+      await runKybPass(latest);
+      await runAssetVerificationPass(latest);
     } catch (err) {
       console.error("Unified CRE loop error:", err);
     }

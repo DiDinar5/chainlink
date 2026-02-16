@@ -23,6 +23,30 @@ export interface WorldIdVerificationRequestEventData {
   blockNumber: number;
 }
 
+export interface KybRequestEventData {
+  kybRequestId: bigint;
+  user: string;
+  companyRef: string;
+  jurisdiction: string;
+  txHash: string;
+  blockNumber: number;
+}
+
+export interface AssetVerificationRequestEventData {
+  assetRequestId: bigint;
+  kybRequestId: bigint;
+  user: string;
+  chainId: bigint;
+  tokenAddress: string;
+  tokenId: bigint;
+  tokenStandard: number;
+  symbolOrName: string;
+  metadataHash: string;
+  metadataURI: string;
+  txHash: string;
+  blockNumber: number;
+}
+
 export interface SumsubTokenResponse {
   token: string;
   userId: string;
@@ -51,6 +75,8 @@ export interface WorkflowState {
   lastIssueTokenBlock: number;
   lastSyncBlock: number;
   lastWorldIdBlock: number;
+  lastKybBlock: number;
+  lastAssetBlock: number;
   users: Record<string, UserSyncState>;
   sumsubUserIds: SumsubUserIdMap;
 }

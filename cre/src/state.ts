@@ -7,6 +7,8 @@ const DEFAULT_STATE: WorkflowState = {
   lastIssueTokenBlock: 0,
   lastSyncBlock: 0,
   lastWorldIdBlock: 0,
+  lastKybBlock: 0,
+  lastAssetBlock: 0,
   users: {},
   sumsubUserIds: {}
 };
@@ -30,6 +32,8 @@ export function readState(): WorkflowState {
       lastIssueTokenBlock: parsed.lastIssueTokenBlock ?? 0,
       lastSyncBlock: parsed.lastSyncBlock ?? 0,
       lastWorldIdBlock: parsed.lastWorldIdBlock ?? 0,
+      lastKybBlock: parsed.lastKybBlock ?? 0,
+      lastAssetBlock: parsed.lastAssetBlock ?? 0,
       users: parsed.users ?? {},
       sumsubUserIds: parsed.sumsubUserIds ?? {}
     };

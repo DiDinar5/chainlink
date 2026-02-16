@@ -1,16 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Contract, BrowserProvider, Interface, ethers } from "ethers";
+import { BrowserProvider, Contract, Interface, ethers } from "ethers";
 import { useAppKit, useAppKitAccount, useAppKitProvider } from "@reown/appkit/react";
 import { IDKitWidget, IErrorState, ISuccessResult, VerificationLevel } from "@worldcoin/idkit";
-import { passRegistryAbi } from "./abi/passRegistry";
+import { assetRegistryAbi } from "./abi/assetRegistry";
 import { kycBrokerAbi } from "./abi/kycBroker";
-import { accessPassAbi } from "./abi/accessPass";
-import { claimDropAbi } from "./abi/claimDrop";
+import { passRegistryAbi } from "./abi/passRegistry";
 import { env } from "./lib/env";
 import { decryptSessionCiphertextHex, generateSessionKeyPairHex } from "./lib/sessionCrypto";
-import assetsData from "./data/assets.json";
-
-const assetImages = import.meta.glob("./assets/*", { eager: true, import: "default" }) as Record<string, string>;
 
 type VerifySnapshot = {
   ok: boolean;
@@ -35,119 +31,256 @@ type PendingDecryptPacket = {
 
 type OnchainSnapshot = {
   verify: VerifySnapshot;
-  attestationExists: boolean;
   worldIdVerified: boolean;
-  hasOnchainEncryptionKey: boolean;
+  hasKybRequest: boolean;
+  latestKybRequestId: string;
 };
 
-type WalletProviderLike = any;
-type SimpleActionKind = "connect" | "kyc" | "status";
-
-type ProgressCopy = {
-  title: string;
-  message: string;
-};
-
-type SimpleResultModal = {
-  title: string;
-  message: string;
-  isError: boolean;
-};
+type WalletProviderLike = unknown;
 
 type SumsubStatusSnapshot = {
   reviewStatus: string;
   reviewAnswer: string;
 };
 
-type AssetRule = "none" | "kyc" | "worldid" | "both";
+type KybStubStatus = "not_started" | "in_review" | "verified";
 
-type DemoNetwork = {
+type TokenStandard = "ERC20" | "ERC721" | "ERC1155";
+
+type NetworkOption = {
   chainId: number;
-  name: string;
-  explorer: string;
-  faucet: string;
+  label: string;
 };
 
-type DemoAsset = {
-  chainId: number;
-  tokenId: number;
-  name: string;
-  subname: string;
-  description: string;
-  category: string;
-  healthScore: number;
-  priceUSDx: number;
-  supplyForDemo: number;
-  apr?: number | false;
-  requirement: AssetRule;
-  image: string;
+type KybCompanyProfile = {
+  legalName: string;
+  companyRef: string;
+  jurisdiction: string;
+  registrationCountry: string;
+  website: string;
+  verifiedAt: number;
+  mode: "stub";
 };
 
-const DEMO_NETWORKS: DemoNetwork[] = [
+type AssetDeploymentDraft = {
+  id: string;
+  chainId: string;
+  tokenAddress: string;
+  tokenStandard: TokenStandard;
+  tokenId: string;
+};
+
+type AssetDeploymentRecord = {
+  chainId: number;
+  tokenAddress: string;
+  tokenStandard: TokenStandard;
+  tokenId: string;
+  assetRequestId?: string;
+  requestTxHash?: string;
+  requestBlockNumber?: number;
+  assetKey?: string;
+  verifyTxHash?: string;
+  verifyBlockNumber?: number;
+  verifiedAt?: number;
+};
+
+type RegistryRecordStatus = "queued" | "submitting" | "submitted" | "verified" | "failed";
+
+type AssetDraft = {
+  name: string;
+  metadataUri: string;
+  metadataHash: string;
+  notes: string;
+  deployments: AssetDeploymentDraft[];
+};
+
+type RegistryRecord = {
+  id: string;
+  createdAt: number;
+  name: string;
+  metadataUri: string;
+  metadataHash: string;
+  notes: string;
+  deployments: AssetDeploymentRecord[];
+  companyLegalName?: string;
+  companyRef?: string;
+  companyJurisdiction?: string;
+  kybVerifiedAt?: number;
+  kybRequestId?: string;
+  status: RegistryRecordStatus;
+  lastError?: string;
+};
+
+type ProgressCopy = {
+  title: string;
+  message: string;
+};
+
+type GeneratedAssetPreset = {
+  name: string;
+  metadataUri: string;
+  notes: string;
+  deployments: Array<{
+    chainId: number;
+    tokenAddress: string;
+    tokenStandard: TokenStandard;
+    tokenId: string;
+  }>;
+};
+
+type VerifiedAssetDeployment = {
+  assetKey: string;
+  chainId: number;
+  tokenAddress: string;
+  tokenStandard: TokenStandard;
+  tokenId: string;
+  kybRequestId: string;
+  verifiedAt: number;
+  updatedAt: number;
+  verifyTxHash?: string;
+  verifyBlockNumber?: number;
+};
+
+type VerifiedAssetCard = {
+  groupId: string;
+  owner: string;
+  name: string;
+  metadataUri: string;
+  metadataHash: string;
+  latestVerifiedAt: number;
+  latestUpdatedAt: number;
+  deployments: VerifiedAssetDeployment[];
+  sourceRecordId?: string;
+};
+
+const SESSION_SECRET_STORAGE_PREFIX = "passstore:session-secret:";
+const KYB_STUB_STORAGE_PREFIX = "passstore:kyb-stub:";
+const KYB_COMPANY_PROFILE_STORAGE_PREFIX = "passstore:kyb-company-profile:";
+const REGISTRY_QUEUE_STORAGE_PREFIX = "passstore:registry-queue:";
+const NETWORK_OPTIONS: NetworkOption[] = [
+  { chainId: 31337, label: "Localhost" },
+  { chainId: 11155111, label: "Ethereum Sepolia" },
+  { chainId: 84532, label: "Base Sepolia" },
+  { chainId: 421614, label: "Arbitrum Sepolia" },
+  { chainId: 80002, label: "Polygon Amoy" },
+  { chainId: 97, label: "BSC Testnet" }
+];
+
+function isTokenStandard(value: unknown): value is TokenStandard {
+  return value === "ERC20" || value === "ERC721" || value === "ERC1155";
+}
+
+function defaultNetworkChainId(preferredChainId: number): number {
+  if (preferredChainId > 0) {
+    return preferredChainId;
+  }
+  return NETWORK_OPTIONS[0].chainId;
+}
+
+function chainName(chainId: number): string {
+  const network = NETWORK_OPTIONS.find((item) => item.chainId === chainId);
+  return network ? network.label : `Chain ${chainId}`;
+}
+
+function tokenStandardToCode(value: TokenStandard): number {
+  switch (value) {
+    case "ERC20":
+      return 1;
+    case "ERC721":
+      return 2;
+    case "ERC1155":
+      return 3;
+    default:
+      return 4;
+  }
+}
+
+function tokenStandardFromCode(value: number): TokenStandard {
+  switch (value) {
+    case 2:
+      return "ERC721";
+    case 3:
+      return "ERC1155";
+    case 1:
+    default:
+      return "ERC20";
+  }
+}
+
+const GENERATED_ASSET_PRESETS: GeneratedAssetPreset[] = [
   {
-    chainId: 11155111,
-    name: "Sepolia",
-    explorer: "https://sepolia.etherscan.io",
-    faucet: "https://cloud.google.com/application/web3/faucet/ethereum/sepolia"
+    name: "No Time To Explain Poster",
+    metadataUri: "ipfs://bafybeibnsoufr2renqzsh347nrx54wcubt5lgkeivez63xvivplfwhtpym/metadata.json",
+    notes:
+      "IPFS reference preset. Preview image: ipfs://bafybeidfjqmasnpu6z7gvn7l6wthdcyzxh5uystkky3xvutddbapchbopi/no-time-to-explain.jpeg",
+    deployments: [
+      {
+        chainId: 11155111,
+        tokenAddress: "0x779877A7B0D9E8603169DdbD7836e478b4624789",
+        tokenStandard: "ERC20",
+        tokenId: "0"
+      },
+      {
+        chainId: 84532,
+        tokenAddress: "0x036CbD53842c5426634e7929541eC2318f3dCf7e",
+        tokenStandard: "ERC20",
+        tokenId: "0"
+      }
+    ]
   },
   {
-    chainId: 80002,
-    name: "Amoy",
-    explorer: "https://amoy.polygonscan.com",
-    faucet: "https://faucet.stakepool.dev.br/amoy"
+    name: "OpenSea Creatures Ticket Series",
+    metadataUri: "ipfs://QmTNgv3jx2HHfBjQX9RnKtxj2xv2xQDtbVXoRi5rJ3a46e",
+    notes: "Collection-style IPFS metadata preset for NFT/NFT1155 cross-network listing demo.",
+    deployments: [
+      {
+        chainId: 11155111,
+        tokenAddress: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+        tokenStandard: "ERC721",
+        tokenId: "1"
+      },
+      {
+        chainId: 80002,
+        tokenAddress: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+        tokenStandard: "ERC1155",
+        tokenId: "1"
+      }
+    ]
   },
   {
-    chainId: 97,
-    name: "BSC Testnet",
-    explorer: "https://testnet.bscscan.com",
-    faucet: "https://www.bnbchain.org/en/testnet-faucet"
+    name: "RWA Bond Note Pilot",
+    metadataUri: "ipfs://Qmf5RHhnUjSCfCN9d1Ee6sUWxe3Eqvogw1cTsssrxAxtPn/metadata.json",
+    notes: "RWA-style preset with shared metadata and multi-network ERC20 deployments.",
+    deployments: [
+      {
+        chainId: 421614,
+        tokenAddress: "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
+        tokenStandard: "ERC20",
+        tokenId: "0"
+      },
+      {
+        chainId: 97,
+        tokenAddress: "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        tokenStandard: "ERC20",
+        tokenId: "0"
+      }
+    ]
   }
 ];
 
-const DEMO_ASSETS: DemoAsset[] = assetsData.assets as DemoAsset[];
-const DEMO_VERIFICATION_EXPIRES = "2026-08-12";
-
-function resolveAssetImage(imagePath: string): string {
-  const filename = imagePath.split("/").pop();
-  if (!filename) {
-    return imagePath;
-  }
-
-  const entry = Object.entries(assetImages).find(([path]) => path.endsWith(`/${filename}`));
-  return entry ? entry[1] : imagePath;
+function makeContracts(runner: ethers.ContractRunner) {
+  return {
+    registry: new Contract(env.passRegistry, passRegistryAbi, runner),
+    broker: new Contract(env.kycBroker, kycBrokerAbi, runner),
+    assetRegistry: new Contract(env.assetRegistry, assetRegistryAbi, runner)
+  };
 }
 
-function getSimpleProgressCopy(
-  status: string,
-  waitingPacket: boolean,
-  refreshingStatus: boolean,
-  syncWaiting: boolean
-): ProgressCopy {
-  if (waitingPacket) {
-    return {
-      title: "Preparing verification",
-      message: "We are securely requesting your KYC session. This usually takes a few seconds."
-    };
+function shortAddress(address: string): string {
+  if (!address) {
+    return "-";
   }
-
-  if (refreshingStatus || syncWaiting) {
-    return {
-      title: "Updating your status",
-      message: "Checking your latest verification result onchain. Please keep this page open."
-    };
-  }
-
-  if (status.toLowerCase().includes("wallet")) {
-    return {
-      title: "Action required",
-      message: "Please confirm the request in your wallet to continue."
-    };
-  }
-
-  return {
-    title: "Please wait",
-    message: "Processing your request..."
-  };
+  return `${address.slice(0, 8)}...${address.slice(-6)}`;
 }
 
 function reasonLabel(reason: number): string {
@@ -173,21 +306,26 @@ function reasonLabel(reason: number): string {
   }
 }
 
-function shortAddress(address: string): string {
-  if (!address) {
-    return "-";
+function queueStatusBadgeClass(status: RegistryRecordStatus): "ok" | "warn" | "neutral" {
+  switch (status) {
+    case "verified":
+      return "ok";
+    case "failed":
+      return "warn";
+    case "queued":
+    case "submitting":
+    case "submitted":
+    default:
+      return "neutral";
   }
-
-  return `${address.slice(0, 8)}...${address.slice(-6)}`;
 }
 
-function makeContracts(runner: ethers.ContractRunner) {
-  return {
-    registry: new Contract(env.passRegistry, passRegistryAbi, runner),
-    broker: new Contract(env.kycBroker, kycBrokerAbi, runner),
-    accessPass: new Contract(env.accessPass, accessPassAbi, runner),
-    claimDrop: new Contract(env.claimDrop, claimDropAbi, runner)
-  };
+function formatUnixTimestamp(ts: number): string {
+  if (!ts) {
+    return "Never";
+  }
+  const date = new Date(ts * 1000);
+  return Number.isNaN(date.getTime()) ? "Invalid" : date.toLocaleString();
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -250,10 +388,48 @@ function parseWorldIdPrecheckMode(raw: string): "strict" | "soft" | "off" {
   return "strict";
 }
 
-const SESSION_SECRET_STORAGE_PREFIX = "passstore:session-secret:";
+function getProgressCopy(status: string, waitingPacket: boolean, refreshingStatus: boolean, syncWaiting: boolean): ProgressCopy {
+  if (waitingPacket) {
+    return {
+      title: "Waiting CRE packet",
+      message: "Encrypted SDK token is being delivered from CRE."
+    };
+  }
+
+  if (refreshingStatus || syncWaiting) {
+    return {
+      title: "Syncing status",
+      message: "Checking fresh onchain verification state."
+    };
+  }
+
+  if (status.toLowerCase().includes("wallet")) {
+    return {
+      title: "Wallet action required",
+      message: "Please confirm the transaction in your wallet."
+    };
+  }
+
+  return {
+    title: "Processing",
+    message: "Please keep this tab open."
+  };
+}
 
 function sessionSecretStorageKey(address: string): string {
   return `${SESSION_SECRET_STORAGE_PREFIX}${address.toLowerCase()}`;
+}
+
+function kybStubStorageKey(address: string): string {
+  return `${KYB_STUB_STORAGE_PREFIX}${address.toLowerCase()}`;
+}
+
+function kybCompanyProfileStorageKey(address: string): string {
+  return `${KYB_COMPANY_PROFILE_STORAGE_PREFIX}${address.toLowerCase()}`;
+}
+
+function registryQueueStorageKey(address: string): string {
+  return `${REGISTRY_QUEUE_STORAGE_PREFIX}${address.toLowerCase()}`;
 }
 
 function readSessionSecret(address: string): string {
@@ -276,8 +452,311 @@ function writeSessionSecret(address: string, secretKeyHex: string): void {
   try {
     window.sessionStorage.setItem(sessionSecretStorageKey(address), secretKeyHex);
   } catch {
-    // Keep flow working even if browser storage is unavailable.
+    // Keep flow alive if storage is unavailable.
   }
+}
+
+function readKybStubStatus(address: string): KybStubStatus {
+  if (typeof window === "undefined" || !address) {
+    return "not_started";
+  }
+
+  try {
+    const value = window.localStorage.getItem(kybStubStorageKey(address));
+    if (value === "in_review" || value === "verified") {
+      return value;
+    }
+  } catch {
+    // Ignore storage issues in dev flow.
+  }
+
+  return "not_started";
+}
+
+function writeKybStubStatus(address: string, status: KybStubStatus): void {
+  if (typeof window === "undefined" || !address) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(kybStubStorageKey(address), status);
+  } catch {
+    // Ignore storage issues in dev flow.
+  }
+}
+
+function buildStubCompanyProfile(address: string, verifiedAt?: number): KybCompanyProfile {
+  const normalized = address.toLowerCase();
+  const suffix = normalized.slice(2, 8).toUpperCase();
+  const websiteSuffix = normalized.slice(2, 10);
+
+  return {
+    legalName: `Stub Issuer ${suffix} LLC`,
+    companyRef: `KYB-${suffix}`,
+    jurisdiction: "US-DE",
+    registrationCountry: "United States",
+    website: `https://issuer-${websiteSuffix}.stub`,
+    verifiedAt: verifiedAt ?? Date.now(),
+    mode: "stub"
+  };
+}
+
+function readKybCompanyProfile(address: string): KybCompanyProfile | null {
+  if (typeof window === "undefined" || !address) {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(kybCompanyProfileStorageKey(address));
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw) as Partial<KybCompanyProfile>;
+    if (
+      typeof parsed.legalName !== "string" ||
+      typeof parsed.companyRef !== "string" ||
+      typeof parsed.jurisdiction !== "string"
+    ) {
+      return null;
+    }
+
+    return {
+      legalName: parsed.legalName,
+      companyRef: parsed.companyRef,
+      jurisdiction: parsed.jurisdiction,
+      registrationCountry: typeof parsed.registrationCountry === "string" ? parsed.registrationCountry : "",
+      website: typeof parsed.website === "string" ? parsed.website : "",
+      verifiedAt: typeof parsed.verifiedAt === "number" ? parsed.verifiedAt : Date.now(),
+      mode: "stub"
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeKybCompanyProfile(address: string, profile: KybCompanyProfile | null): void {
+  if (typeof window === "undefined" || !address) {
+    return;
+  }
+
+  try {
+    if (!profile) {
+      window.localStorage.removeItem(kybCompanyProfileStorageKey(address));
+      return;
+    }
+    window.localStorage.setItem(kybCompanyProfileStorageKey(address), JSON.stringify(profile));
+  } catch {
+    // Ignore storage issues in dev flow.
+  }
+}
+
+function makeDraftRowId(): string {
+  return `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function createDeploymentDraft(preferredChainId: number): AssetDeploymentDraft {
+  return {
+    id: makeDraftRowId(),
+    chainId: String(defaultNetworkChainId(preferredChainId)),
+    tokenAddress: "",
+    tokenStandard: "ERC20",
+    tokenId: "0"
+  };
+}
+
+function deploymentDraftFromPresetRow(
+  row: GeneratedAssetPreset["deployments"][number]
+): AssetDeploymentDraft {
+  return {
+    id: makeDraftRowId(),
+    chainId: String(row.chainId),
+    tokenAddress: row.tokenAddress,
+    tokenStandard: row.tokenStandard,
+    tokenId: row.tokenStandard === "ERC20" ? "0" : row.tokenId
+  };
+}
+
+function readRegistryQueue(address: string): RegistryRecord[] {
+  if (typeof window === "undefined" || !address) {
+    return [];
+  }
+
+  try {
+    const raw = window.localStorage.getItem(registryQueueStorageKey(address));
+    if (!raw) {
+      return [];
+    }
+
+    const parsed = JSON.parse(raw) as Array<Record<string, unknown>>;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    const normalized: RegistryRecord[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+
+      const deploymentsRaw = Array.isArray(item.deployments) ? item.deployments : [];
+      const deployments: AssetDeploymentRecord[] = [];
+
+      for (const deployment of deploymentsRaw) {
+        if (!deployment || typeof deployment !== "object") {
+          continue;
+        }
+
+        const chainId = Number((deployment as Record<string, unknown>).chainId);
+        const tokenAddress = String((deployment as Record<string, unknown>).tokenAddress ?? "");
+        const tokenStandardValue = (deployment as Record<string, unknown>).tokenStandard;
+        const tokenId = String((deployment as Record<string, unknown>).tokenId ?? "0");
+        if (!Number.isInteger(chainId) || chainId <= 0 || !isTokenStandard(tokenStandardValue)) {
+          continue;
+        }
+        deployments.push({
+          chainId,
+          tokenAddress,
+          tokenStandard: tokenStandardValue,
+          tokenId,
+          assetRequestId:
+            typeof (deployment as Record<string, unknown>).assetRequestId === "string"
+              ? String((deployment as Record<string, unknown>).assetRequestId)
+              : undefined,
+          requestTxHash:
+            typeof (deployment as Record<string, unknown>).requestTxHash === "string"
+              ? String((deployment as Record<string, unknown>).requestTxHash)
+              : undefined,
+          requestBlockNumber:
+            typeof (deployment as Record<string, unknown>).requestBlockNumber === "number"
+              ? Number((deployment as Record<string, unknown>).requestBlockNumber)
+              : undefined,
+          assetKey:
+            typeof (deployment as Record<string, unknown>).assetKey === "string"
+              ? String((deployment as Record<string, unknown>).assetKey)
+              : undefined,
+          verifyTxHash:
+            typeof (deployment as Record<string, unknown>).verifyTxHash === "string"
+              ? String((deployment as Record<string, unknown>).verifyTxHash)
+              : undefined,
+          verifyBlockNumber:
+            typeof (deployment as Record<string, unknown>).verifyBlockNumber === "number"
+              ? Number((deployment as Record<string, unknown>).verifyBlockNumber)
+              : undefined,
+          verifiedAt:
+            typeof (deployment as Record<string, unknown>).verifiedAt === "number"
+              ? Number((deployment as Record<string, unknown>).verifiedAt)
+              : undefined
+        });
+      }
+
+      // Backward compatibility with the old single-network record format.
+      if (deployments.length === 0) {
+        const legacyChainId = Number(item.chainId);
+        const legacyTokenAddress = String(item.tokenAddress ?? "");
+        const legacyTokenStandard = item.tokenStandard;
+        const legacyTokenId = String(item.tokenId ?? "0");
+        if (
+          Number.isInteger(legacyChainId) &&
+          legacyChainId > 0 &&
+          isTokenStandard(legacyTokenStandard) &&
+          legacyTokenAddress
+        ) {
+          deployments.push({
+            chainId: legacyChainId,
+            tokenAddress: legacyTokenAddress,
+            tokenStandard: legacyTokenStandard,
+            tokenId: legacyTokenId
+          });
+        }
+      }
+
+      if (deployments.length === 0) {
+        continue;
+      }
+
+      const rawStatus = String(item.status ?? "queued");
+      const status: RegistryRecordStatus =
+        rawStatus === "queued" ||
+        rawStatus === "submitting" ||
+        rawStatus === "submitted" ||
+        rawStatus === "verified" ||
+        rawStatus === "failed"
+          ? rawStatus
+          : "queued";
+
+      normalized.push({
+        id: String(item.id ?? makeDraftRowId()),
+        createdAt: Number(item.createdAt ?? Date.now()),
+        name: String(item.name ?? ""),
+        metadataUri: String(item.metadataUri ?? ""),
+        metadataHash: String(item.metadataHash ?? ""),
+        notes: String(item.notes ?? ""),
+        deployments,
+        companyLegalName: typeof item.companyLegalName === "string" ? item.companyLegalName : undefined,
+        companyRef: typeof item.companyRef === "string" ? item.companyRef : undefined,
+        companyJurisdiction: typeof item.companyJurisdiction === "string" ? item.companyJurisdiction : undefined,
+        kybVerifiedAt: typeof item.kybVerifiedAt === "number" ? item.kybVerifiedAt : undefined,
+        kybRequestId: typeof item.kybRequestId === "string" ? item.kybRequestId : undefined,
+        status,
+        lastError: typeof item.lastError === "string" ? item.lastError : undefined
+      });
+    }
+
+    return normalized;
+  } catch {
+    return [];
+  }
+}
+
+function writeRegistryQueue(address: string, queue: RegistryRecord[]): void {
+  if (typeof window === "undefined" || !address) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(registryQueueStorageKey(address), JSON.stringify(queue));
+  } catch {
+    // Ignore storage issues in dev flow.
+  }
+}
+
+function defaultAssetDraft(chainId: number): AssetDraft {
+  return {
+    name: "",
+    metadataUri: "",
+    metadataHash: "",
+    notes: "",
+    deployments: [createDeploymentDraft(chainId)]
+  };
+}
+
+function parseSumsubStatus(payload: unknown): SumsubStatusSnapshot {
+  if (!payload || typeof payload !== "object") {
+    return { reviewStatus: "", reviewAnswer: "" };
+  }
+
+  const raw = payload as Record<string, unknown>;
+  const reviewStatus = String(raw.reviewStatus ?? "").trim().toLowerCase();
+
+  let reviewAnswer = "";
+  if (raw.reviewResult && typeof raw.reviewResult === "object") {
+    const reviewResult = raw.reviewResult as Record<string, unknown>;
+    reviewAnswer = String(reviewResult.reviewAnswer ?? "").trim().toLowerCase();
+  }
+
+  return { reviewStatus, reviewAnswer };
+}
+
+function isTerminalSumsubStatus(payload: unknown): boolean {
+  const { reviewStatus, reviewAnswer } = parseSumsubStatus(payload);
+  if (reviewStatus === "completed") {
+    return true;
+  }
+  if (reviewAnswer === "green" || reviewAnswer === "red") {
+    return true;
+  }
+  return false;
 }
 
 export default function App() {
@@ -293,8 +772,6 @@ export default function App() {
   const [verify, setVerify] = useState<VerifySnapshot>({ ok: false, reason: 1 });
   const [attestation, setAttestation] = useState<AttestationSnapshot | null>(null);
   const [encryptionReady, setEncryptionReady] = useState<boolean>(false);
-  const [hasMinted, setHasMinted] = useState<boolean>(false);
-  const [hasClaimed, setHasClaimed] = useState<boolean>(false);
   const [creIssuerAllowed, setCreIssuerAllowed] = useState<boolean | null>(null);
   const [pendingDecrypt, setPendingDecrypt] = useState<PendingDecryptPacket | null>(null);
   const [sessionSecretKeyHex, setSessionSecretKeyHex] = useState<string>("");
@@ -302,13 +779,20 @@ export default function App() {
   const [sumsubModalOpen, setSumsubModalOpen] = useState<boolean>(false);
   const [worldIdVerified, setWorldIdVerified] = useState<boolean>(false);
   const [worldIdErrorCode, setWorldIdErrorCode] = useState<string>("");
-  const [purchasedAssets, setPurchasedAssets] = useState<Record<number, boolean>>({});
-  const [simpleActionKind, setSimpleActionKind] = useState<SimpleActionKind | null>(null);
-  const [simpleResultModal, setSimpleResultModal] = useState<SimpleResultModal | null>(null);
+  const [kybStubStatus, setKybStubStatus] = useState<KybStubStatus>("not_started");
+  const [kybCompanyProfile, setKybCompanyProfile] = useState<KybCompanyProfile | null>(null);
+  const [hasKybRequest, setHasKybRequest] = useState<boolean>(false);
+  const [latestKybRequestId, setLatestKybRequestId] = useState<string>("-");
+  const [generatedPresetCursor, setGeneratedPresetCursor] = useState<number>(0);
+  const [assetDraft, setAssetDraft] = useState<AssetDraft>(defaultAssetDraft(env.chainId));
+  const [registryQueue, setRegistryQueue] = useState<RegistryRecord[]>([]);
+  const [verifiedAssets, setVerifiedAssets] = useState<VerifiedAssetCard[]>([]);
+  const [refreshingAssets, setRefreshingAssets] = useState<boolean>(false);
+
   const { open } = useAppKit();
   const { address: appKitAddress, isConnected: isAppKitConnected } = useAppKitAccount({ namespace: "eip155" });
   const { walletProvider } = useAppKitProvider<WalletProviderLike>("eip155");
-  const simpleWasBusyRef = useRef<boolean>(false);
+
   const sessionSecretKeyRef = useRef<string>("");
   const worldIdPollNonceRef = useRef<number>(0);
   const worldIdPendingAddressRef = useRef<string>("");
@@ -319,8 +803,7 @@ export default function App() {
     if (!walletProvider) {
       return null;
     }
-
-    return new BrowserProvider(walletProvider as any);
+    return new BrowserProvider(walletProvider as ethers.Eip1193Provider);
   }, [walletProvider]);
 
   useEffect(() => {
@@ -349,9 +832,14 @@ export default function App() {
         setEncryptionReady(false);
         setSumsubModalOpen(false);
         setWorldIdVerified(false);
+        setKybStubStatus("not_started");
+        setKybCompanyProfile(null);
+        setHasKybRequest(false);
+        setLatestKybRequestId("-");
+        setRegistryQueue([]);
+        setVerifiedAssets([]);
         setStatus("Wallet disconnected");
       }
-
       return;
     }
 
@@ -366,113 +854,102 @@ export default function App() {
       setEncryptionReady(false);
       setSumsubModalOpen(false);
       setWorldIdVerified(false);
+      setHasKybRequest(false);
+      setLatestKybRequestId("-");
       setStatus("Wallet connected");
       window.setTimeout(() => {
         void refreshOnchainData(appKitAddress);
       }, 0);
     }
-  }, [account, appKitAddress, isAppKitConnected, provider]);
+  }, [account, appKitAddress, isAppKitConnected]);
 
   useEffect(() => {
-    const inProgress = waitingPacket || refreshingStatus || syncWaiting || (busy && simpleActionKind !== null);
-    if (inProgress) {
-      simpleWasBusyRef.current = true;
+    if (!account) {
+      setKybStubStatus("not_started");
+      setKybCompanyProfile(null);
+      setRegistryQueue([]);
+      setVerifiedAssets([]);
       return;
     }
 
-    if (!simpleWasBusyRef.current || !simpleActionKind) {
+    setKybStubStatus(readKybStubStatus(account));
+    const storedCompanyProfile = readKybCompanyProfile(account);
+    setKybCompanyProfile(storedCompanyProfile ?? buildStubCompanyProfile(account));
+    setRegistryQueue(readRegistryQueue(account));
+  }, [account]);
+
+  useEffect(() => {
+    if (!account) {
+      return;
+    }
+    writeKybStubStatus(account, kybStubStatus);
+  }, [account, kybStubStatus]);
+
+  useEffect(() => {
+    if (!account) {
+      return;
+    }
+    writeKybCompanyProfile(account, kybCompanyProfile);
+  }, [account, kybCompanyProfile]);
+
+  useEffect(() => {
+    if (!account) {
+      return;
+    }
+    writeRegistryQueue(account, registryQueue);
+  }, [account, registryQueue]);
+
+  useEffect(() => {
+    if (!account || !provider) {
       return;
     }
 
-    simpleWasBusyRef.current = false;
+    void refreshVerifiedAssets(account, provider);
+    const intervalId = window.setInterval(() => {
+      void refreshVerifiedAssets(account, provider);
+    }, 9000);
 
-    if (error) {
-      setSimpleResultModal({
-        title: "Action not completed",
-        message: error,
-        isError: true
-      });
-      setSimpleActionKind(null);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [account, provider]);
+
+  useEffect(() => {
+    if (!account || !attestation) {
       return;
     }
 
-    if (simpleActionKind === "kyc") {
-      setSimpleResultModal({
-        title: "Verification started",
-        message: sumsubModalOpen
-          ? "The verification form is open. Complete it and then check your status."
-          : status || "KYC request submitted successfully.",
-        isError: false
-      });
-      setSimpleActionKind(null);
-      return;
+    const flags = BigInt(attestation.flags);
+    const onchainKyb = (flags & 4n) === 4n && attestation.exists && !attestation.revoked;
+    if (onchainKyb && kybStubStatus !== "verified") {
+      setKybStubStatus("verified");
+      setStatus("KYB attestation confirmed onchain.");
     }
+    if (!onchainKyb && hasKybRequest && kybStubStatus === "not_started") {
+      setKybStubStatus("in_review");
+    }
+  }, [account, attestation, hasKybRequest, kybStubStatus]);
 
-    setSimpleResultModal({
-      title: verify.ok ? "Status updated" : "Status checked",
-      message: verify.ok ? "You're verified and all gated actions are now unlocked." : status || "Status check completed.",
-      isError: false
+  useEffect(() => {
+    setAssetDraft((previous) => {
+      if (previous.deployments.length === 0) {
+        return {
+          ...previous,
+          deployments: [createDeploymentDraft(chainId || env.chainId)]
+        };
+      }
+
+      if (previous.deployments[0].chainId) {
+        return previous;
+      }
+
+      const resolvedChainId = String(defaultNetworkChainId(chainId || env.chainId));
+      return {
+        ...previous,
+        deployments: [{ ...previous.deployments[0], chainId: resolvedChainId }, ...previous.deployments.slice(1)]
+      };
     });
-    setSimpleActionKind(null);
-  }, [
-    busy,
-    waitingPacket,
-    refreshingStatus,
-    syncWaiting,
-    simpleActionKind,
-    error,
-    status,
-    verify.ok,
-    sumsubModalOpen,
-    isAppKitConnected,
-    account
-  ]);
-
-  async function connectWalletFromSimple() {
-    setSimpleResultModal(null);
-    setSimpleActionKind(null);
-    await connectWallet();
-  }
-
-  async function goToKycFromSimple() {
-    setSimpleResultModal(null);
-    setSimpleActionKind("kyc");
-    await goToKyc();
-  }
-
-  async function refreshStatusFromSimple() {
-    setSimpleResultModal(null);
-    setSimpleActionKind("status");
-    await refreshStatusWithRetry();
-  }
-
-  function parseSumsubStatus(payload: unknown): SumsubStatusSnapshot {
-    if (!payload || typeof payload !== "object") {
-      return { reviewStatus: "", reviewAnswer: "" };
-    }
-
-    const raw = payload as Record<string, unknown>;
-    const reviewStatus = String(raw.reviewStatus ?? "").trim().toLowerCase();
-
-    let reviewAnswer = "";
-    if (raw.reviewResult && typeof raw.reviewResult === "object") {
-      const reviewResult = raw.reviewResult as Record<string, unknown>;
-      reviewAnswer = String(reviewResult.reviewAnswer ?? "").trim().toLowerCase();
-    }
-
-    return { reviewStatus, reviewAnswer };
-  }
-
-  function isTerminalSumsubStatus(payload: unknown): boolean {
-    const { reviewStatus, reviewAnswer } = parseSumsubStatus(payload);
-    if (reviewStatus === "completed") {
-      return true;
-    }
-    if (reviewAnswer === "green" || reviewAnswer === "red") {
-      return true;
-    }
-    return false;
-  }
+  }, [chainId]);
 
   async function triggerAutoSyncFromSumsub(payload: unknown): Promise<void> {
     if (!isTerminalSumsubStatus(payload)) {
@@ -489,6 +966,7 @@ export default function App() {
     if (now < sumsubAutoSyncCooldownUntilRef.current) {
       return;
     }
+
     sumsubAutoSyncCooldownUntilRef.current = now + 30_000;
     sumsubAutoSyncInFlightRef.current = true;
 
@@ -532,7 +1010,7 @@ export default function App() {
     }
 
     if (pollNonce === worldIdPollNonceRef.current) {
-      setStatus("World ID proof accepted. CRE attestation is still pending. You can press Check status.");
+      setStatus("World ID proof accepted. CRE attestation is still pending. Press Check status.");
     }
   }
 
@@ -554,6 +1032,7 @@ export default function App() {
 
       if (worldIdPrecheckMode !== "off") {
         setStatus("Pre-checking World ID proof...");
+
         try {
           const precheckResponse = await fetch(worldIdVerifyEndpoint(env.worldIdAppId), {
             method: "POST",
@@ -570,9 +1049,11 @@ export default function App() {
           if (!precheckResponse.ok) {
             const errorBody = await precheckResponse.text();
             const precheckError = parseWorldIdVerifyError(errorBody, precheckResponse.status);
+
             if (worldIdPrecheckMode === "strict") {
               throw new Error(precheckError);
             }
+
             setStatus(`World ID pre-check failed (${precheckError}). Submitting onchain request...`);
           }
         } catch (precheckErr) {
@@ -597,6 +1078,7 @@ export default function App() {
 
       let requestIdLabel = "";
       const iface = new Interface(kycBrokerAbi);
+
       for (const log of receipt?.logs ?? []) {
         if (log.address.toLowerCase() !== env.kycBroker.toLowerCase()) {
           continue;
@@ -609,7 +1091,7 @@ export default function App() {
             break;
           }
         } catch {
-          // Skip unrelated logs.
+          // Ignore unrelated logs.
         }
       }
 
@@ -636,6 +1118,7 @@ export default function App() {
     setWorldIdErrorCode("");
     const targetAddress = worldIdPendingAddressRef.current || account;
     setStatus("World ID proof accepted by app. Waiting for CRE onchain attestation...");
+
     if (targetAddress) {
       void waitForWorldIdAttestation(targetAddress);
     }
@@ -644,6 +1127,7 @@ export default function App() {
   async function onWorldIdError(errorState: IErrorState): Promise<void> {
     const code = String(errorState.code || "unknown_error");
     const detail = errorState.message?.trim();
+
     setWorldIdErrorCode(code);
     worldIdPendingAddressRef.current = "";
     setStatus(detail ? `World ID declined (${code}): ${detail}` : `World ID declined (${code}).`);
@@ -666,6 +1150,8 @@ export default function App() {
       setEncryptionReady(false);
       setSumsubModalOpen(false);
       setWorldIdVerified(false);
+      setHasKybRequest(false);
+      setLatestKybRequestId("-");
     }
 
     return { signer, address };
@@ -699,7 +1185,7 @@ export default function App() {
       setStatus(
         isAppKitConnected
           ? "Account modal opened. You can switch network or disconnect there."
-          : "AppKit modal opened. Pick MetaMask in the wallet list."
+          : "Wallet modal opened. Choose MetaMask in AppKit."
       );
     } catch (err) {
       setError((err as Error).message);
@@ -727,19 +1213,20 @@ export default function App() {
       return null;
     }
 
-    const { registry, broker, accessPass, claimDrop } = makeContracts(activeProvider);
+    const { registry, broker } = makeContracts(activeProvider);
 
-    const [verifyResult, attResult, pubKeyHex, mintedResult, claimedResult] = await Promise.all([
+    const [verifyResult, attResult, pubKeyHex, hasKybRequestOnchain, latestKybRequestIdOnchain] = await Promise.all([
       registry.verifyUser(user, env.policyId),
       registry.attestations(user),
       broker.encryptionPubKey(user),
-      accessPass.hasMinted(user),
-      claimDrop.claimed(user)
+      broker.hasKybRequest(user),
+      broker.latestKybRequestId(user)
     ]);
 
     const verifySnapshot = { ok: Boolean(verifyResult[0]), reason: Number(verifyResult[1]) };
     const attFlags = BigInt(attResult[0]);
     const isWorldIdLinked = (attFlags & env.worldIdFlag) === env.worldIdFlag && Boolean(attResult[7]) && !Boolean(attResult[6]);
+
     setVerify(verifySnapshot);
     setAttestation({
       flags: attFlags.toString(),
@@ -750,36 +1237,253 @@ export default function App() {
       exists: Boolean(attResult[7])
     });
     setWorldIdVerified(isWorldIdLinked);
+    setHasKybRequest(Boolean(hasKybRequestOnchain));
+    setLatestKybRequestId(Boolean(hasKybRequestOnchain) ? (latestKybRequestIdOnchain as bigint).toString() : "-");
+
     const hasOnchainEncryptionKey = pubKeyHex !== "0x";
     const localSessionSecret =
       account && account.toLowerCase() === user ? sessionSecretKeyRef.current || readSessionSecret(user) : readSessionSecret(user);
+
     if (localSessionSecret && account && account.toLowerCase() === user && !sessionSecretKeyRef.current) {
       setSessionSecretKeyHex(localSessionSecret);
       sessionSecretKeyRef.current = localSessionSecret;
     }
+
     setEncryptionReady(hasOnchainEncryptionKey && Boolean(localSessionSecret));
+
     if (hasOnchainEncryptionKey && !localSessionSecret) {
       setStatus("Onchain encryption key exists, but local session key is missing. Click Enable encryption again.");
     }
-    setHasMinted(Boolean(mintedResult));
-    setHasClaimed(Boolean(claimedResult));
 
     if (env.creIssuer) {
       const allowed = await registry.isIssuer(env.creIssuer);
       setCreIssuerAllowed(Boolean(allowed));
     }
 
+    await refreshVerifiedAssets(user, activeProvider);
+
     return {
       verify: verifySnapshot,
-      attestationExists: Boolean(attResult[7]),
       worldIdVerified: isWorldIdLinked,
-      hasOnchainEncryptionKey
+      hasKybRequest: Boolean(hasKybRequestOnchain),
+      latestKybRequestId: Boolean(hasKybRequestOnchain) ? (latestKybRequestIdOnchain as bigint).toString() : "-"
     };
+  }
+
+  async function refreshVerifiedAssets(forAccount?: string, providerOverride?: BrowserProvider): Promise<void> {
+    const activeProvider = providerOverride ?? provider;
+    if (!activeProvider) {
+      return;
+    }
+
+    const user = (forAccount ?? account).toLowerCase();
+    if (!user) {
+      setVerifiedAssets([]);
+      return;
+    }
+
+    const network = await activeProvider.getNetwork();
+    if (env.chainId > 0 && Number(network.chainId) !== env.chainId) {
+      return;
+    }
+
+    const { assetRegistry } = makeContracts(activeProvider);
+    setRefreshingAssets(true);
+
+    try {
+      const ownerKeys = (await assetRegistry.getOwnerAssetKeys(user)) as string[];
+      const latestBlock = await activeProvider.getBlockNumber();
+      const verifyMetaByKey = new Map<string, { txHash?: string; blockNumber?: number }>();
+
+      for (const key of ownerKeys) {
+        const filter = assetRegistry.filters.AssetVerified(key, user);
+        const logs = await assetRegistry.queryFilter(filter, 0, latestBlock);
+        const latestLog = logs.length > 0 ? logs[logs.length - 1] : undefined;
+
+        if (latestLog) {
+          verifyMetaByKey.set(key.toLowerCase(), {
+            txHash: latestLog.transactionHash,
+            blockNumber: latestLog.blockNumber
+          });
+        }
+      }
+
+      type VerifiedDeploymentRow = VerifiedAssetDeployment & {
+        owner: string;
+        name: string;
+        metadataUri: string;
+        metadataHash: string;
+        sourceRecordId?: string;
+      };
+
+      const verifiedRows: VerifiedDeploymentRow[] = [];
+      for (const key of ownerKeys) {
+        const record = await assetRegistry.assets(key);
+        const exists = Boolean(record[12]);
+        const revoked = Boolean(record[11]);
+        if (!exists || revoked) {
+          continue;
+        }
+
+        const chainIdValue = Number(record[1]);
+        const tokenAddressValue = String(record[2]);
+        const tokenIdValue = String(record[3]);
+        const tokenStandardValue = tokenStandardFromCode(Number(record[4]));
+        const symbolOrNameValue = String(record[5]);
+        const metadataHashValue = String(record[6]);
+        const metadataUriValue = String(record[7]);
+        const kybRequestIdValue = (record[8] as bigint).toString();
+        const verifiedAtValue = Number(record[9]);
+        const updatedAtValue = Number(record[10]);
+        const verifyMeta = verifyMetaByKey.get(key.toLowerCase());
+
+        const linkedQueueRecord = registryQueue.find((item) =>
+          item.deployments.some(
+            (deployment) =>
+              deployment.chainId === chainIdValue &&
+              deployment.tokenStandard === tokenStandardValue &&
+              deployment.tokenId === tokenIdValue &&
+              deployment.tokenAddress.toLowerCase() === tokenAddressValue.toLowerCase()
+          )
+        );
+
+        verifiedRows.push({
+          assetKey: key,
+          owner: user,
+          chainId: chainIdValue,
+          tokenAddress: tokenAddressValue,
+          tokenStandard: tokenStandardValue,
+          tokenId: tokenIdValue,
+          name: linkedQueueRecord?.name || symbolOrNameValue,
+          metadataUri: linkedQueueRecord?.metadataUri || metadataUriValue,
+          metadataHash: linkedQueueRecord?.metadataHash || metadataHashValue,
+          kybRequestId: kybRequestIdValue,
+          verifiedAt: verifiedAtValue,
+          updatedAt: updatedAtValue,
+          verifyTxHash: verifyMeta?.txHash,
+          verifyBlockNumber: verifyMeta?.blockNumber,
+          sourceRecordId: linkedQueueRecord?.id
+        });
+      }
+
+      const groupedByAsset = new Map<string, VerifiedAssetCard>();
+      for (const row of verifiedRows) {
+        const fallbackGroup = `${row.owner}:${row.name}:${row.metadataHash || row.metadataUri}`;
+        const groupId = row.sourceRecordId ?? fallbackGroup;
+        const existing = groupedByAsset.get(groupId);
+
+        if (!existing) {
+          groupedByAsset.set(groupId, {
+            groupId,
+            owner: row.owner,
+            name: row.name,
+            metadataUri: row.metadataUri,
+            metadataHash: row.metadataHash,
+            latestVerifiedAt: row.verifiedAt,
+            latestUpdatedAt: row.updatedAt,
+            deployments: [
+              {
+                assetKey: row.assetKey,
+                chainId: row.chainId,
+                tokenAddress: row.tokenAddress,
+                tokenStandard: row.tokenStandard,
+                tokenId: row.tokenId,
+                kybRequestId: row.kybRequestId,
+                verifiedAt: row.verifiedAt,
+                updatedAt: row.updatedAt,
+                verifyTxHash: row.verifyTxHash,
+                verifyBlockNumber: row.verifyBlockNumber
+              }
+            ],
+            sourceRecordId: row.sourceRecordId
+          });
+          continue;
+        }
+
+        existing.latestVerifiedAt = Math.max(existing.latestVerifiedAt, row.verifiedAt);
+        existing.latestUpdatedAt = Math.max(existing.latestUpdatedAt, row.updatedAt);
+        existing.deployments.push({
+          assetKey: row.assetKey,
+          chainId: row.chainId,
+          tokenAddress: row.tokenAddress,
+          tokenStandard: row.tokenStandard,
+          tokenId: row.tokenId,
+          kybRequestId: row.kybRequestId,
+          verifiedAt: row.verifiedAt,
+          updatedAt: row.updatedAt,
+          verifyTxHash: row.verifyTxHash,
+          verifyBlockNumber: row.verifyBlockNumber
+        });
+      }
+
+      const groupedCards = Array.from(groupedByAsset.values());
+      groupedCards.forEach((card) => {
+        card.deployments.sort((left, right) => {
+          if (left.chainId !== right.chainId) {
+            return left.chainId - right.chainId;
+          }
+          return right.verifiedAt - left.verifiedAt;
+        });
+      });
+      groupedCards.sort((left, right) => {
+        if (right.latestVerifiedAt !== left.latestVerifiedAt) {
+          return right.latestVerifiedAt - left.latestVerifiedAt;
+        }
+        return right.latestUpdatedAt - left.latestUpdatedAt;
+      });
+
+      setVerifiedAssets(groupedCards);
+
+      setRegistryQueue((previous) =>
+        previous.map((item) => {
+          const updatedDeployments = item.deployments.map((deployment) => {
+            const matchedRow = verifiedRows.find(
+              (row) =>
+                row.chainId === deployment.chainId &&
+                row.tokenStandard === deployment.tokenStandard &&
+                row.tokenId === deployment.tokenId &&
+                row.tokenAddress.toLowerCase() === deployment.tokenAddress.toLowerCase()
+            );
+
+            if (!matchedRow) {
+              return deployment;
+            }
+
+            return {
+              ...deployment,
+              assetKey: matchedRow.assetKey,
+              verifyTxHash: matchedRow.verifyTxHash ?? deployment.verifyTxHash,
+              verifyBlockNumber: matchedRow.verifyBlockNumber ?? deployment.verifyBlockNumber,
+              verifiedAt: matchedRow.verifiedAt
+            };
+          });
+
+          const allVerified = updatedDeployments.every((deployment) => Boolean(deployment.assetKey));
+          let nextStatus: RegistryRecordStatus = item.status;
+          if (allVerified) {
+            nextStatus = "verified";
+          } else if (item.status === "submitted" || item.status === "verified") {
+            nextStatus = "submitted";
+          }
+
+          return {
+            ...item,
+            deployments: updatedDeployments,
+            status: nextStatus
+          };
+        })
+      );
+    } catch (err) {
+      console.error("Failed to refresh verified assets", err);
+    } finally {
+      setRefreshingAssets(false);
+    }
   }
 
   async function ensureSessionEncryption(signer: ethers.Signer, address: string): Promise<string> {
     const keyPair = generateSessionKeyPairHex();
     const { broker } = makeContracts(signer);
+
     const tx = await broker.setEncryptionPubKey(keyPair.publicKeyHex);
     await tx.wait();
 
@@ -788,6 +1492,7 @@ export default function App() {
     writeSessionSecret(address, keyPair.secretKeyHex);
     setEncryptionReady(true);
     setStatus(`Session encryption key stored onchain for ${shortAddress(address)}`);
+
     return keyPair.secretKeyHex;
   }
 
@@ -902,14 +1607,16 @@ export default function App() {
 
     setSdkTokenPreview(preview);
     setPendingDecrypt(null);
+
     if (isMockToken) {
       setSumsubModalOpen(false);
-      setStatus("Demo mode: KYC mock accepted. Press Sync + refresh status to get onchain GREEN.");
+      setStatus("Demo mode: KYC mock accepted. Press Check status to sync onchain state.");
     } else {
       setStatus(`SDK token decrypted (expiresAt=${packet.expiresAt}), launching Sumsub...`);
       launchSumsub(decryptedToken);
-      setStatus("Sumsub started automatically. Complete verification flow, then press Sync + refresh status.");
+      setStatus("Sumsub started. Complete verification and then press Check status.");
     }
+
     await refreshOnchainData(packet.owner);
   }
 
@@ -935,7 +1642,7 @@ export default function App() {
           break;
         }
       } catch {
-        // Skip logs from other contracts.
+        // Ignore logs from other contracts.
       }
     }
 
@@ -964,50 +1671,11 @@ export default function App() {
         await autoDecryptAndLaunch(pendingPacket, sessionSecretHex);
       } catch (pollErr) {
         setError((pollErr as Error).message);
-        setStatus("Could not auto-decrypt token. Press Start verification again.");
+        setStatus("Could not auto-decrypt token. Start KYC again.");
       } finally {
         setWaitingPacket(false);
       }
     })();
-  }
-
-  async function startVerification() {
-    if (!provider || !account) {
-      setError("Connect wallet first");
-      return;
-    }
-
-    let activeSessionSecret = sessionSecretKeyRef.current;
-    if (!activeSessionSecret) {
-      activeSessionSecret = readSessionSecret(account);
-      if (activeSessionSecret) {
-        sessionSecretKeyRef.current = activeSessionSecret;
-        setSessionSecretKeyHex(activeSessionSecret);
-      }
-    }
-
-    if (!activeSessionSecret) {
-      setError("Click Enable encryption first to generate a local session key");
-      return;
-    }
-
-    setBusy(true);
-    setError("");
-
-    try {
-      const onExpectedNetwork = await ensureExpectedNetwork();
-      if (!onExpectedNetwork) {
-        return;
-      }
-
-      const { signer, address } = await getActiveSignerAndAddress();
-      await submitKycRequest(signer, address, activeSessionSecret);
-    } catch (err) {
-      setError((err as Error).message);
-      setWaitingPacket(false);
-    } finally {
-      setBusy(false);
-    }
   }
 
   async function goToKyc() {
@@ -1027,6 +1695,7 @@ export default function App() {
 
       const { signer, address } = await getActiveSignerAndAddress();
       let activeSessionSecret = sessionSecretKeyRef.current;
+
       if (!activeSessionSecret) {
         activeSessionSecret = readSessionSecret(address);
         if (activeSessionSecret) {
@@ -1076,12 +1745,14 @@ export default function App() {
       return true;
     } catch (err) {
       const message = (err as Error).message;
+
       if (message.includes("KycSessionBroker: no kyc request")) {
         setStatus("No KYC request found yet. Start verification first.");
         return false;
       }
+
       if (message.includes("KycSessionBroker: sync cooldown")) {
-        setStatus("Sync was requested recently (cooldown). Waiting for CRE update...");
+        setStatus("Sync was requested recently. Waiting for CRE update...");
         return false;
       }
 
@@ -1151,14 +1822,21 @@ export default function App() {
     }
   }
 
-  async function mintAccessPass() {
+  async function startKybStub() {
     if (!provider || !account) {
       setError("Connect wallet first");
       return;
     }
 
+    if (!verify.ok) {
+      setError("KYB is available only after KYC is verified");
+      return;
+    }
+
     setBusy(true);
     setError("");
+    const profile = kybCompanyProfile ?? buildStubCompanyProfile(account);
+    setKybCompanyProfile(profile);
 
     try {
       const onExpectedNetwork = await ensureExpectedNetwork();
@@ -1166,406 +1844,1021 @@ export default function App() {
         return;
       }
 
-      const { signer } = await getActiveSignerAndAddress();
-      const { accessPass } = makeContracts(signer);
-      const tx = await accessPass.mint();
-      await tx.wait();
-      setStatus("AccessPass minted");
-      await refreshOnchainData();
+      const { signer, address } = await getActiveSignerAndAddress();
+      const { broker } = makeContracts(signer);
+      setKybStubStatus("in_review");
+      setStatus("Submitting KYB stub request onchain...");
+
+      const tx = await broker.requestKyb(profile.companyRef, profile.jurisdiction);
+      const receipt = await tx.wait();
+      const iface = new Interface(kycBrokerAbi);
+      let newKybRequestId: string | null = null;
+
+      for (const log of receipt?.logs ?? []) {
+        if (log.address.toLowerCase() !== env.kycBroker.toLowerCase()) {
+          continue;
+        }
+
+        try {
+          const parsed = iface.parseLog(log);
+          if (parsed?.name === "KybRequested") {
+            newKybRequestId = (parsed.args.kybRequestId as bigint).toString();
+            break;
+          }
+        } catch {
+          // Ignore unrelated logs.
+        }
+      }
+
+      if (newKybRequestId) {
+        setLatestKybRequestId(newKybRequestId);
+      }
+      setHasKybRequest(true);
+      setStatus(
+        newKybRequestId
+          ? `KYB stub request #${newKybRequestId} submitted. Waiting CRE attestation...`
+          : "KYB stub request submitted. Waiting CRE attestation..."
+      );
+      await refreshOnchainData(address);
     } catch (err) {
+      setKybStubStatus("not_started");
       setError((err as Error).message);
     } finally {
       setBusy(false);
     }
   }
 
-  async function claimDrop() {
-    if (!provider || !account) {
-      setError("Connect wallet first");
-      return;
-    }
-
-    setBusy(true);
-    setError("");
-
-    try {
-      const onExpectedNetwork = await ensureExpectedNetwork();
-      if (!onExpectedNetwork) {
-        return;
-      }
-
-      const { signer } = await getActiveSignerAndAddress();
-      const { claimDrop } = makeContracts(signer);
-      const tx = await claimDrop.claim();
-      await tx.wait();
-      setStatus("Drop claimed");
-      await refreshOnchainData();
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function isRuleSatisfied(rule: AssetRule): boolean {
-    if (rule === "none") {
-      return true;
-    }
-    if (rule === "kyc") {
-      return verify.ok;
-    }
-    if (rule === "worldid") {
-      return worldIdVerified;
-    }
-    return verify.ok && worldIdVerified;
-  }
-
-  function ruleLabel(rule: AssetRule): string {
-    if (rule === "none") {
-      return "No verification needed";
-    }
-    if (rule === "kyc") {
-      return "Requires KYC";
-    }
-    if (rule === "worldid") {
-      return "Requires World ID";
-    }
-    return "Requires KYC + World ID";
-  }
-
-  function lockHint(rule: AssetRule): string {
-    if (rule === "none") {
-      return "";
-    }
-    if (rule === "kyc" && !verify.ok) {
-      return "Complete KYC first";
-    }
-    if (rule === "worldid" && !worldIdVerified) {
-      return "Complete World ID first";
-    }
-    if (rule === "both") {
-      if (!verify.ok && !worldIdVerified) {
-        return "Complete KYC and World ID";
-      }
-      if (!verify.ok) {
-        return "Complete KYC first";
-      }
-      if (!worldIdVerified) {
-        return "Complete World ID first";
-      }
-    }
-    return "";
-  }
-
-  function chainName(chainIdValue: number): string {
-    const network = DEMO_NETWORKS.find((entry) => entry.chainId === chainIdValue);
-    return network ? network.name : `Chain ${chainIdValue}`;
-  }
-
-  function assetStatusLabel(asset: DemoAsset): string {
-    if (purchasedAssets[asset.tokenId]) {
-      return "Purchased";
-    }
-    return isRuleSatisfied(asset.requirement) ? "Available" : "Locked";
-  }
-
-  async function buyDemoAsset(asset: DemoAsset): Promise<void> {
+  function approveKybStub() {
     if (!account) {
       setError("Connect wallet first");
       return;
     }
-    if (networkMismatch) {
-      setError(`Wrong network: expected chainId ${env.chainId}, got ${chainId}`);
+
+    if (!verify.ok) {
+      setError("KYB is available only after KYC is verified");
       return;
     }
-    if (!isRuleSatisfied(asset.requirement)) {
-      setError(lockHint(asset.requirement) || "Verification is required");
+
+    const baseProfile = kybCompanyProfile ?? buildStubCompanyProfile(account);
+    const profile: KybCompanyProfile = { ...baseProfile, verifiedAt: Date.now() };
+
+    setError("");
+    setKybStubStatus("verified");
+    setKybCompanyProfile(profile);
+    setStatus(`KYB stub marked as verified for ${profile.legalName}. If onchain flag is still missing, click Check status.`);
+  }
+
+  function resetKybStub() {
+    if (!account) {
+      setError("Connect wallet first");
       return;
     }
 
     setError("");
-    setPurchasedAssets((previous) => ({ ...previous, [asset.tokenId]: true }));
-    setStatus(`${asset.name} purchased (demo).`);
+    setKybStubStatus("not_started");
+    setKybCompanyProfile(buildStubCompanyProfile(account));
+    setStatus("KYB stub reset.");
+  }
+
+  function updateDraft<K extends keyof AssetDraft>(field: K, value: AssetDraft[K]) {
+    setAssetDraft((previous) => ({ ...previous, [field]: value }));
+  }
+
+  function generateAssetDraftFromPreset() {
+    if (GENERATED_ASSET_PRESETS.length === 0) {
+      setError("No asset presets configured");
+      return;
+    }
+
+    const presetIndex = generatedPresetCursor % GENERATED_ASSET_PRESETS.length;
+    const preset = GENERATED_ASSET_PRESETS[presetIndex];
+    const metadataHash = ethers.keccak256(ethers.toUtf8Bytes(`${preset.name}|${preset.metadataUri}`));
+
+    setError("");
+    setAssetDraft({
+      name: preset.name,
+      metadataUri: preset.metadataUri,
+      metadataHash,
+      notes: preset.notes,
+      deployments: preset.deployments.map((deployment) => deploymentDraftFromPresetRow(deployment))
+    });
+    setGeneratedPresetCursor((previous) => (previous + 1) % GENERATED_ASSET_PRESETS.length);
+    setStatus(`Generated asset preset: ${preset.name}`);
+  }
+
+  function updateDeploymentDraft<K extends keyof AssetDeploymentDraft>(
+    deploymentId: string,
+    field: K,
+    value: AssetDeploymentDraft[K]
+  ) {
+    setAssetDraft((previous) => ({
+      ...previous,
+      deployments: previous.deployments.map((deployment) => {
+        if (deployment.id !== deploymentId) {
+          return deployment;
+        }
+
+        const updated = { ...deployment, [field]: value } as AssetDeploymentDraft;
+        if (field === "tokenStandard" && value === "ERC20") {
+          updated.tokenId = "0";
+        }
+        return updated;
+      })
+    }));
+  }
+
+  function addDeploymentRow() {
+    setAssetDraft((previous) => ({
+      ...previous,
+      deployments: [...previous.deployments, createDeploymentDraft(chainId || env.chainId)]
+    }));
+  }
+
+  function removeDeploymentRow(deploymentId: string) {
+    setAssetDraft((previous) => {
+      if (previous.deployments.length <= 1) {
+        setError("At least one network deployment is required");
+        return previous;
+      }
+
+      return {
+        ...previous,
+        deployments: previous.deployments.filter((deployment) => deployment.id !== deploymentId)
+      };
+    });
+  }
+
+  function addAssetToQueue(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!account) {
+      setError("Connect wallet first");
+      return;
+    }
+
+    if (!verify.ok) {
+      setError("KYC must be verified before asset registration");
+      return;
+    }
+
+    if (!hasKybFlag) {
+      setError("KYB must be verified before asset registration");
+      return;
+    }
+
+    if (!kybCompanyProfile) {
+      setError("No KYB company profile found. Complete KYB first.");
+      return;
+    }
+
+    if (!assetDraft.name.trim()) {
+      setError("Asset name is required");
+      return;
+    }
+
+    if (assetDraft.deployments.length === 0) {
+      setError("Add at least one network deployment");
+      return;
+    }
+
+    if (!assetDraft.metadataUri.trim() && !assetDraft.metadataHash.trim()) {
+      setError("Add metadata URI or metadata hash");
+      return;
+    }
+
+    const normalizedDeployments: AssetDeploymentRecord[] = [];
+    for (const deployment of assetDraft.deployments) {
+      const chainValue = Number(deployment.chainId);
+      if (!Number.isInteger(chainValue) || chainValue <= 0) {
+        setError("Choose a valid network for each deployment row");
+        return;
+      }
+
+      const tokenAddressRaw = deployment.tokenAddress.trim();
+      if (!tokenAddressRaw) {
+        setError("Every deployment row requires a contract value");
+        return;
+      }
+
+      const normalizedTokenId = deployment.tokenId.trim() || "0";
+      if (!/^\d+$/.test(normalizedTokenId)) {
+        setError("Token ID must be an integer >= 0");
+        return;
+      }
+
+      if (deployment.tokenStandard === "ERC20" && normalizedTokenId !== "0") {
+        setError("For ERC20 deployment rows tokenId must be 0");
+        return;
+      }
+
+      normalizedDeployments.push({
+        chainId: chainValue,
+        // Prototype mode: allow non-checksummed and even non-EVM identifiers for UI mocking.
+        tokenAddress: ethers.isAddress(tokenAddressRaw) ? ethers.getAddress(tokenAddressRaw) : tokenAddressRaw,
+        tokenStandard: deployment.tokenStandard,
+        tokenId: normalizedTokenId
+      });
+    }
+
+    setError("");
+
+    const record: RegistryRecord = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+      createdAt: Date.now(),
+      name: assetDraft.name.trim(),
+      metadataUri: assetDraft.metadataUri.trim(),
+      metadataHash: assetDraft.metadataHash.trim(),
+      notes: assetDraft.notes.trim(),
+      deployments: normalizedDeployments,
+      companyLegalName: kybCompanyProfile.legalName,
+      companyRef: kybCompanyProfile.companyRef,
+      companyJurisdiction: kybCompanyProfile.jurisdiction,
+      kybVerifiedAt: kybCompanyProfile.verifiedAt,
+      kybRequestId: hasKybRequest ? latestKybRequestId : undefined,
+      status: "queued"
+    };
+
+    setRegistryQueue((previous) => [record, ...previous]);
+    setAssetDraft(defaultAssetDraft(chainId || env.chainId));
+    setStatus(`Asset "${record.name}" added to queue for ${kybCompanyProfile.legalName}. Submit it to CRE from the queue.`);
+  }
+
+  function removeQueuedAsset(id: string) {
+    setRegistryQueue((previous) => previous.filter((item) => item.id !== id));
+    setStatus("Asset draft removed from queue.");
+  }
+
+  async function submitQueuedAsset(recordId: string): Promise<void> {
+    if (!provider || !account) {
+      setError("Connect wallet first");
+      return;
+    }
+
+    const record = registryQueue.find((item) => item.id === recordId);
+    if (!record) {
+      setError("Asset record not found");
+      return;
+    }
+
+    if (record.status === "verified") {
+      setStatus(`Asset "${record.name}" already verified.`);
+      return;
+    }
+
+    if (!hasKybRequest || latestKybRequestId === "-") {
+      setError("Start KYB first to create an onchain KYB request ID");
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+
+    try {
+      const onExpectedNetwork = await ensureExpectedNetwork();
+      if (!onExpectedNetwork) {
+        return;
+      }
+
+      setRegistryQueue((previous) =>
+        previous.map((item) => (item.id === recordId ? { ...item, status: "submitting", lastError: undefined } : item))
+      );
+
+      const { signer, address } = await getActiveSignerAndAddress();
+      const { broker } = makeContracts(signer);
+      const iface = new Interface(kycBrokerAbi);
+      const kybRequestId = BigInt(latestKybRequestId);
+
+      const rawMetadataHash = record.metadataHash.trim();
+      let metadataHash = ethers.ZeroHash;
+      if (rawMetadataHash) {
+        if (!ethers.isHexString(rawMetadataHash, 32)) {
+          throw new Error(`Asset "${record.name}" has invalid metadata hash (expected bytes32)`);
+        }
+        metadataHash = rawMetadataHash;
+      }
+
+      const updatedDeployments: AssetDeploymentRecord[] = [];
+
+      for (const deployment of record.deployments) {
+        if (!ethers.isAddress(deployment.tokenAddress)) {
+          throw new Error(
+            `Deployment ${chainName(deployment.chainId)} has non-EVM token address. Use a valid 0x address for onchain submit.`
+          );
+        }
+
+        const tokenIdBigint = BigInt(deployment.tokenId);
+        const tokenStandardCode = tokenStandardToCode(deployment.tokenStandard);
+
+        const tx = await broker.requestAssetVerification(
+          kybRequestId,
+          BigInt(deployment.chainId),
+          ethers.getAddress(deployment.tokenAddress),
+          tokenIdBigint,
+          tokenStandardCode,
+          record.name,
+          metadataHash,
+          record.metadataUri
+        );
+        const receipt = await tx.wait();
+
+        let assetRequestId: string | undefined;
+        for (const log of receipt?.logs ?? []) {
+          if (log.address.toLowerCase() !== env.kycBroker.toLowerCase()) {
+            continue;
+          }
+
+          try {
+            const parsed = iface.parseLog(log);
+            if (parsed?.name === "AssetVerificationRequested") {
+              assetRequestId = (parsed.args.assetRequestId as bigint).toString();
+              break;
+            }
+          } catch {
+            // Ignore unrelated logs.
+          }
+        }
+
+        updatedDeployments.push({
+          ...deployment,
+          assetRequestId,
+          requestTxHash: tx.hash,
+          requestBlockNumber: receipt ? Number(receipt.blockNumber) : undefined
+        });
+      }
+
+      setRegistryQueue((previous) =>
+        previous.map((item) =>
+          item.id === recordId
+            ? {
+                ...item,
+                status: "submitted",
+                kybRequestId: kybRequestId.toString(),
+                deployments: updatedDeployments,
+                lastError: undefined
+              }
+            : item
+        )
+      );
+
+      setStatus(`Submitted ${updatedDeployments.length} deployment request(s) for "${record.name}". Waiting CRE verification...`);
+      await refreshOnchainData(address);
+    } catch (err) {
+      const message = (err as Error).message;
+      setRegistryQueue((previous) =>
+        previous.map((item) => (item.id === recordId ? { ...item, status: "failed", lastError: message } : item))
+      );
+      setError(message);
+      setStatus(`Asset submit failed: ${message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitAllQueuedAssets(): Promise<void> {
+    const pendingIds = registryQueue.filter((item) => item.status === "queued" || item.status === "failed").map((item) => item.id);
+    if (pendingIds.length === 0) {
+      setStatus("No queued assets to submit.");
+      return;
+    }
+
+    for (const recordId of pendingIds) {
+      // Sequential submit keeps wallet confirmations deterministic.
+      await submitQueuedAsset(recordId);
+    }
   }
 
   const expectedChainId = env.chainId || 0;
   const networkMismatch = chainId > 0 && expectedChainId > 0 && chainId !== expectedChainId;
   const worldIdConfigured = Boolean(env.worldIdAppId && env.worldIdAction);
   const hasSdkToken = sdkTokenPreview !== "-";
-  const connectButtonLabel = isAppKitConnected ? "Connected!" : "Connect wallet";
-  const simpleBusy = waitingPacket || refreshingStatus || syncWaiting || (busy && simpleActionKind !== null);
-  const simpleProgress = getSimpleProgressCopy(status, waitingPacket, refreshingStatus, syncWaiting);
   const worldIdVerificationLevel = parseWorldIdVerificationLevel(env.worldIdVerificationLevel);
   const worldIdPrecheckMode = parseWorldIdPrecheckMode(env.worldIdPrecheckMode);
-  const walletTopLabel = account ? shortAddress(account) : "Wallet not connected";
-  const kycStatusLabel = verify.ok ? "KYC: verified" : hasSdkToken ? "KYC: in progress" : "KYC: pending";
-  const worldIdStatusLabel = worldIdVerified ? "World ID: verified" : "World ID: pending";
-  const attestationFlags = attestation ? Number(attestation.flags) : 0;
-  const hasKycFlag = (attestationFlags & 1) === 1;
-  const hasWorldIdFlag = (attestationFlags & 2) === 2;
-  const unlockedAssetsCount = DEMO_ASSETS.filter((asset) => isRuleSatisfied(asset.requirement)).length;
-  const kycOnlyUnlocked = verify.ok;
-  const worldIdOnlyUnlocked = worldIdVerified;
-  const combinedUnlocked = verify.ok && worldIdVerified;
+
+  const walletLabel = account ? shortAddress(account) : "Wallet not connected";
+  const chainLabel = chainId || expectedChainId || "-";
+
+  const attestationFlags = attestation ? BigInt(attestation.flags) : 0n;
+  const hasKycFlag = (attestationFlags & 1n) === 1n;
+  const hasWorldIdFlag = (attestationFlags & env.worldIdFlag) === env.worldIdFlag;
+  const hasKybFlag = (attestationFlags & 4n) === 4n;
+
+  const kybStatusLabel =
+    kybStubStatus === "verified" ? "Verified" : kybStubStatus === "in_review" ? "In review" : "Not started";
+  const kybCompanyLinked = hasKybFlag && Boolean(kybCompanyProfile);
+  const nextGeneratedPresetName =
+    GENERATED_ASSET_PRESETS.length > 0
+      ? GENERATED_ASSET_PRESETS[generatedPresetCursor % GENERATED_ASSET_PRESETS.length].name
+      : "Preset";
+
+  const verificationDoneCount = [verify.ok, worldIdVerified, hasKybFlag].filter(Boolean).length;
+  const verificationPercent = Math.round((verificationDoneCount / 3) * 100);
+
+  const globalBusy = busy || waitingPacket || refreshingStatus || syncWaiting;
+  const progressCopy = getProgressCopy(status, waitingPacket, refreshingStatus, syncWaiting);
 
   return (
-    <div className="page page-simple">
-      <header className="panel hero reveal hero-simple">
-        <div className="hero-top-row">
-          <div className="simple-top-actions">
-            <button
-              className={`top-action-btn top-connect-btn ${isAppKitConnected ? "is-connected" : ""}`}
-              onClick={connectWalletFromSimple}
-              disabled={busy}
-            >
-              <span className={`wallet-dot ${isAppKitConnected ? "on" : "off"}`} />
-              <span>{connectButtonLabel}</span>
-            </button>
-            <span className={`top-account-pill ${account ? "" : "muted"}`}>{walletTopLabel}</span>
-            <span className={`chain-id-text ${networkMismatch ? "warn" : ""}`}>Chain {chainId || expectedChainId || "-"}</span>
-            <span className={`pill ${verify.ok ? "ok" : "warn"}`}>{verify.ok ? "Policy pass" : "Policy blocked"}</span>
-          </div>
+    <div className="flow-page">
+      <header className="hero-card card">
+        <div>
+          <p className="eyebrow">PassStore CRE Flow</p>
+          <h1>Verification + Registry Console</h1>
+          <p className="hero-text">
+            One interface for wallet session encryption, KYC, World ID, KYB gating and asset registry intake.
+          </p>
         </div>
-
-        <div className="hero-main-row">
-          <div className="hero-main-copy">
-            <h1>
-              PassStore <span>+ Sumsub + World ID</span>
-            </h1>
-            <p>No backend. Encrypted SDK token delivery via CRE, World ID proof flow, and policy-gated onchain access.</p>
-          </div>
+        <div className="hero-actions">
+          <button className="btn primary" onClick={connectWallet} disabled={busy}>
+            {isAppKitConnected ? "Wallet" : "Connect wallet"}
+          </button>
+          <button className="btn" onClick={() => void refreshStatusWithRetry()} disabled={busy || !account || networkMismatch}>
+            Check status
+          </button>
         </div>
       </header>
 
-      <div className="simple-layout reveal">
-        <section className="simple-panel simple-identity-panel">
-          <h2 className="simple-section-title">Verification</h2>
-          <p className="simple-subtitle">Complete KYC and World ID to unlock more assets.</p>
-          {error ? <div className="simple-error">Error: {error}</div> : null}
-
-          <div className="simple-step-card compact">
-            <div className="simple-step-head">
-              <div>
-                <strong>KYC (Sumsub)</strong>
-                <p>{verify.ok ? "Done. Compliance access is unlocked." : "Required for KYC-gated assets."}</p>
-              </div>
-              <span className={`simple-check-badge ${verify.ok ? "ok" : "warn"}`}>{kycStatusLabel}</span>
-            </div>
-            {!verify.ok ? (
-              <div className="simple-step-actions">
-                <button
-                  className="simple-btn primary"
-                  onClick={hasSdkToken ? refreshStatusFromSimple : goToKycFromSimple}
-                  disabled={busy || !account || networkMismatch || waitingPacket}
-                >
-                  {hasSdkToken ? (refreshingStatus ? "Syncing..." : "KYC") : "KYC"}
-                </button>
-              </div>
-            ) : null}
+      <section className="grid two">
+        <article className="card wallet-card">
+          <div className="card-head">
+            <h2>Wallet Session</h2>
+            <span className={`badge ${isAppKitConnected ? "ok" : "warn"}`}>{isAppKitConnected ? "Connected" : "Disconnected"}</span>
           </div>
 
-          <div className="simple-step-card compact">
-            <div className="simple-step-head">
-              <div>
-                <strong>World ID</strong>
-                <p>{worldIdVerified ? "Done. Identity-gated access is unlocked." : "Required for World ID-gated assets."}</p>
-              </div>
-              <span className={`simple-check-badge ${worldIdVerified ? "ok" : "warn"}`}>{worldIdStatusLabel}</span>
+          <dl className="facts">
+            <div>
+              <dt>Address</dt>
+              <dd>{walletLabel}</dd>
             </div>
-            {!worldIdVerified ? (
-              <div className="simple-step-actions">
-                {worldIdConfigured ? (
-                  <IDKitWidget
-                    app_id={env.worldIdAppId as `app_${string}`}
-                    action={env.worldIdAction}
-                    signal={account.toLowerCase()}
-                    verification_level={worldIdVerificationLevel}
-                    handleVerify={handleWorldIdVerify}
-                    onSuccess={onWorldIdSuccess}
-                    onError={onWorldIdError}
-                  >
-                    {({ open }: { open: () => void }) => (
-                      <button className="simple-btn primary" onClick={open} disabled={busy || !account || networkMismatch}>
-                        Start World ID
-                      </button>
-                    )}
-                  </IDKitWidget>
-                ) : (
-                  <button className="simple-btn primary" disabled>
-                    World ID
-                  </button>
-                )}
-              </div>
-            ) : null}
-            {!worldIdConfigured ? (
-              <p className="simple-note">
-                World ID is not configured in env for this build. Set `VITE_WORLD_ID_APP_ID` and `VITE_WORLD_ID_ACTION`.
-              </p>
-            ) : null}
-            <p className="simple-note">
-              World ID note: simulator is fine for demo/dev. Real mobile production flow may require Orb verification.{" "}
-              <a href="https://world.org/orb" target="_blank" rel="noreferrer">
-                Orb locations
-              </a>
-            </p>
-            {worldIdErrorCode ? <p className="simple-note">World ID error code: {worldIdErrorCode}</p> : null}
-          </div>
-        </section>
+            <div>
+              <dt>Network</dt>
+              <dd className={networkMismatch ? "text-warn" : ""}>Chain {chainLabel}</dd>
+            </div>
+            <div>
+              <dt>Policy</dt>
+              <dd>{verify.ok ? "Pass" : `Blocked (${reasonLabel(verify.reason)})`}</dd>
+            </div>
+            <div>
+              <dt>Encryption</dt>
+              <dd>{encryptionReady ? "Ready" : "Missing"}</dd>
+            </div>
+          </dl>
 
-        <section className="simple-panel simple-unlock-panel">
-          <h2 className="simple-section-title">Access Progress</h2>
-          <p className="simple-subtitle">Status updates automatically after each verification step.</p>
-          <div className="unlock-list">
-            <article className="unlock-item">
+          <div className="wallet-actions">
+            <button className="btn" onClick={enableEncryption} disabled={busy || !account || networkMismatch}>
+              Enable encryption
+            </button>
+            <button className="btn" onClick={() => void goToKyc()} disabled={busy || !account || networkMismatch || waitingPacket}>
+              {hasSdkToken ? "Restart KYC" : "Start KYC"}
+            </button>
+            <button className="btn" onClick={() => void refreshStatusWithRetry()} disabled={busy || !account || networkMismatch}>
+              Sync + refresh
+            </button>
+          </div>
+
+          <div className="meta-row">
+            <span>Request ID: {requestId}</span>
+            <span>SDK token: {sdkTokenPreview}</span>
+            <span>
+              CRE issuer: {creIssuerAllowed === null ? "-" : creIssuerAllowed ? "allowed" : "not allowed"}
+            </span>
+          </div>
+        </article>
+
+        <article className="card progress-card">
+          <div className="card-head">
+            <h2>Verification Pipeline</h2>
+            <span className="badge neutral">{verificationPercent}% complete</span>
+          </div>
+
+          <div className="step-list">
+            <div className="step-item">
               <div>
-                <strong>KYC-only assets</strong>
-                <p>Unlocks assets that require only KYC.</p>
+                <strong>1. KYC (Sumsub)</strong>
+                <p>Required for compliance pass and KYB start.</p>
               </div>
-              <span className={`simple-check-badge ${kycOnlyUnlocked ? "ok" : "warn"}`}>{kycOnlyUnlocked ? "Unlocked" : "Locked"}</span>
-            </article>
-            <article className="unlock-item">
+              <span className={`badge ${verify.ok ? "ok" : "warn"}`}>{verify.ok ? "Verified" : hasSdkToken ? "In progress" : "Pending"}</span>
+            </div>
+
+            <div className="step-item">
               <div>
-                <strong>World ID-only assets</strong>
-                <p>Unlocks assets that require only World ID.</p>
+                <strong>2. World ID</strong>
+                <p>Optional second identity signal for your policy model.</p>
               </div>
-              <span className={`simple-check-badge ${worldIdOnlyUnlocked ? "ok" : "warn"}`}>
-                {worldIdOnlyUnlocked ? "Unlocked" : "Locked"}
+              <span className={`badge ${worldIdVerified ? "ok" : "warn"}`}>{worldIdVerified ? "Verified" : "Pending"}</span>
+            </div>
+
+            <div className="step-item">
+              <div>
+                <strong>3. KYB (stub)</strong>
+                <p>Dev placeholder. Asset issuer company is sourced from this profile.</p>
+              </div>
+              <span className={`badge ${hasKybFlag ? "ok" : kybStubStatus === "in_review" ? "neutral" : "warn"}`}>
+                {hasKybFlag ? "Verified" : kybStatusLabel}
               </span>
-            </article>
-            <article className="unlock-item">
-              <div>
-                <strong>Dual-gated assets</strong>
-                <p>Require both KYC and World ID.</p>
+            </div>
+          </div>
+
+          <div className="kyb-company-box">
+            <div className="kyb-company-head">
+              <strong>KYB Company Profile</strong>
+              <span className={`badge ${kybCompanyLinked ? "ok" : "warn"}`}>{kybCompanyLinked ? "Linked" : "Not linked"}</span>
+            </div>
+            <div className="kyb-company-grid">
+              <label>
+                Legal name
+                <input
+                  value={kybCompanyProfile?.legalName ?? "-"}
+                  readOnly
+                />
+              </label>
+              <label>
+                Company ref
+                <input
+                  value={kybCompanyProfile?.companyRef ?? "-"}
+                  readOnly
+                />
+              </label>
+              <label>
+                Jurisdiction
+                <input
+                  value={kybCompanyProfile?.jurisdiction ?? "-"}
+                  readOnly
+                />
+              </label>
+              <label>
+                Registration country
+                <input
+                  value={kybCompanyProfile?.registrationCountry || "-"}
+                  readOnly
+                />
+              </label>
+              <label className="full-width">
+                Website
+                <input
+                  value={kybCompanyProfile?.website || "-"}
+                  readOnly
+                />
+              </label>
+            </div>
+            <p className="hint">Stub mode: company profile is auto-generated from wallet and is not editable.</p>
+          </div>
+
+          <div className="kyb-actions">
+            <button className="btn" onClick={() => void startKybStub()} disabled={busy || !account || !verify.ok || kybStubStatus !== "not_started"}>
+              Start KYB stub
+            </button>
+            <button className="btn" onClick={approveKybStub} disabled={busy || !account || !verify.ok || kybStubStatus !== "in_review"}>
+              Approve KYB stub
+            </button>
+            <button className="btn ghost" onClick={resetKybStub} disabled={busy || !account || kybStubStatus === "not_started"}>
+              Reset
+            </button>
+          </div>
+          <p className="hint">
+            Onchain KYB request: {hasKybRequest && latestKybRequestId !== "-" ? `#${latestKybRequestId}` : "not created"}.
+          </p>
+        </article>
+      </section>
+
+      <section className="grid two">
+        <article className="card worldid-card">
+          <div className="card-head">
+            <h2>World ID Gate</h2>
+            <span className={`badge ${worldIdVerified ? "ok" : "warn"}`}>{worldIdVerified ? "Linked" : "Not linked"}</span>
+          </div>
+
+          <p className="card-text">
+            Use this as second verification provider in parallel with KYC. In staging, simulator proofs are expected.
+          </p>
+
+          {worldIdConfigured ? (
+            <IDKitWidget
+              app_id={env.worldIdAppId as `app_${string}`}
+              action={env.worldIdAction}
+              signal={account.toLowerCase()}
+              verification_level={worldIdVerificationLevel}
+              handleVerify={handleWorldIdVerify}
+              onSuccess={onWorldIdSuccess}
+              onError={onWorldIdError}
+            >
+              {({ open: openIdKit }: { open: () => void }) => (
+                <button className="btn primary" onClick={openIdKit} disabled={busy || !account || networkMismatch}>
+                  Start World ID
+                </button>
+              )}
+            </IDKitWidget>
+          ) : (
+            <button className="btn" disabled>
+              Configure World ID env first
+            </button>
+          )}
+
+          {!worldIdConfigured ? (
+            <p className="hint">Set `VITE_WORLD_ID_APP_ID` and `VITE_WORLD_ID_ACTION` in `frontend/.env`.</p>
+          ) : null}
+
+          <div className="worldid-meta">
+            <span>Precheck mode: {worldIdPrecheckMode}</span>
+            {worldIdErrorCode ? <span className="text-warn">Error code: {worldIdErrorCode}</span> : null}
+          </div>
+        </article>
+
+        <article className="card snapshot-card">
+          <div className="card-head">
+            <h2>Onchain Snapshot</h2>
+            <span className={`badge ${verify.ok ? "ok" : "warn"}`}>{reasonLabel(verify.reason)}</span>
+          </div>
+
+          <dl className="facts compact">
+            <div>
+              <dt>Attestation exists</dt>
+              <dd>{attestation?.exists ? "yes" : "no"}</dd>
+            </div>
+            <div>
+              <dt>Revoked</dt>
+              <dd>{attestation?.revoked ? "yes" : "no"}</dd>
+            </div>
+            <div>
+              <dt>Expiration</dt>
+              <dd>{formatUnixTimestamp(attestation?.expiration ?? 0)}</dd>
+            </div>
+            <div>
+              <dt>Risk score</dt>
+              <dd>{attestation?.riskScore ?? "-"}</dd>
+            </div>
+          </dl>
+
+          <div className="flag-row">
+            <span className={`pill ${hasKycFlag ? "ok" : "warn"}`}>KYC flag</span>
+            <span className={`pill ${hasWorldIdFlag ? "ok" : "warn"}`}>World ID flag</span>
+            <span className={`pill ${hasKybFlag ? "ok" : "warn"}`}>KYB flag</span>
+          </div>
+
+          <p className="hint">
+            Current KYB is a frontend stub. Once CRE KYB provider is wired, this card will show real onchain KYB attestation.
+          </p>
+          <p className="hint">Broker KYB request: {hasKybRequest && latestKybRequestId !== "-" ? `#${latestKybRequestId}` : "none"}</p>
+        </article>
+      </section>
+
+      <section className="card registry-card">
+        <div className="card-head">
+          <h2>Asset Registry Intake</h2>
+          <span className={`badge ${verify.ok && hasKybFlag ? "ok" : "warn"}`}>
+            {verify.ok && hasKybFlag ? "Ready" : "Locked"}
+          </span>
+        </div>
+
+        <p className="card-text">
+          This replaces demo asset cards. Add only real assets here. Issuer company is pulled from KYB.
+        </p>
+
+        <form className="registry-form" onSubmit={addAssetToQueue}>
+          <div className="kyb-linked-company full-width">
+            <div className="kyb-linked-head">
+              <strong>Company from KYB</strong>
+              <span className={`badge ${kybCompanyLinked ? "ok" : "warn"}`}>{kybCompanyLinked ? "Ready" : "Missing"}</span>
+            </div>
+            {kybCompanyProfile ? (
+              <div className="kyb-linked-grid">
+                <label>
+                  Legal name
+                  <input value={kybCompanyProfile.legalName} readOnly />
+                </label>
+                <label>
+                  Company ref
+                  <input value={kybCompanyProfile.companyRef} readOnly />
+                </label>
+                <label>
+                  Jurisdiction
+                  <input value={kybCompanyProfile.jurisdiction} readOnly />
+                </label>
+                <label>
+                  Registration country
+                  <input value={kybCompanyProfile.registrationCountry || "-"} readOnly />
+                </label>
+                <label className="full-width">
+                  Website
+                  <input value={kybCompanyProfile.website || "-"} readOnly />
+                </label>
               </div>
-              <span className={`simple-check-badge ${combinedUnlocked ? "ok" : "warn"}`}>{combinedUnlocked ? "Unlocked" : "Locked"}</span>
-            </article>
+            ) : (
+              <p className="empty-state">No verified KYB company profile yet. Complete KYB step first.</p>
+            )}
           </div>
-          <div className="simple-status-summary">
-            <span>Available now</span>
-            <strong>
-              {unlockedAssetsCount}/{DEMO_ASSETS.length} assets
-            </strong>
+
+          <label>
+            Asset name
+            <input
+              value={assetDraft.name}
+              onChange={(event) => updateDraft("name", event.target.value)}
+              placeholder="Example: Stadium Ticket Pass"
+            />
+          </label>
+
+          <label>
+            Metadata URI
+            <input
+              value={assetDraft.metadataUri}
+              onChange={(event) => updateDraft("metadataUri", event.target.value)}
+              placeholder="ipfs://... or https://..."
+            />
+          </label>
+
+          <label>
+            Metadata hash
+            <input
+              value={assetDraft.metadataHash}
+              onChange={(event) => updateDraft("metadataHash", event.target.value)}
+              placeholder="0x..."
+            />
+          </label>
+
+          <label className="full-width">
+            Notes
+            <textarea
+              value={assetDraft.notes}
+              onChange={(event) => updateDraft("notes", event.target.value)}
+              placeholder="Issuer notes, legal context, ownership model"
+              rows={3}
+            />
+          </label>
+
+          <div className="deployments-box full-width">
+            <div className="deployments-head">
+              <strong>Network deployments</strong>
+              <button className="btn" type="button" onClick={addDeploymentRow} disabled={busy || !account}>
+                + Add network
+              </button>
+            </div>
+
+            <div className="deployments-list">
+              {assetDraft.deployments.map((deployment, index) => (
+                <div className="deployment-row" key={deployment.id}>
+                  <label>
+                    Network
+                    <select
+                      value={deployment.chainId}
+                      onChange={(event) => updateDeploymentDraft(deployment.id, "chainId", event.target.value)}
+                    >
+                      {NETWORK_OPTIONS.map((option) => (
+                        <option key={option.chainId} value={option.chainId}>
+                          {option.label} ({option.chainId})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    Contract address
+                    <input
+                      value={deployment.tokenAddress}
+                      onChange={(event) => updateDeploymentDraft(deployment.id, "tokenAddress", event.target.value)}
+                      placeholder="0x..."
+                    />
+                  </label>
+
+                  <label>
+                    Token type
+                    <select
+                      value={deployment.tokenStandard}
+                      onChange={(event) => updateDeploymentDraft(deployment.id, "tokenStandard", event.target.value as TokenStandard)}
+                    >
+                      <option value="ERC20">ERC20</option>
+                      <option value="ERC721">ERC721 (NFT)</option>
+                      <option value="ERC1155">ERC1155</option>
+                    </select>
+                  </label>
+
+                  <label>
+                    Token ID
+                    <input
+                      value={deployment.tokenId}
+                      onChange={(event) => updateDeploymentDraft(deployment.id, "tokenId", event.target.value)}
+                      placeholder={deployment.tokenStandard === "ERC20" ? "Fixed: 0" : "Token ID"}
+                      inputMode="numeric"
+                      disabled={deployment.tokenStandard === "ERC20"}
+                    />
+                  </label>
+
+                  <button
+                    className="deployment-remove"
+                    type="button"
+                    onClick={() => removeDeploymentRow(deployment.id)}
+                    disabled={assetDraft.deployments.length <= 1}
+                  >
+                    Remove #{index + 1}
+                  </button>
+                </div>
+              ))}
+            </div>
+            <p className="hint">Use one row per network where this asset is deployed. Metadata fields above are shared for all rows.</p>
           </div>
-        </section>
-      </div>
 
-      <section className="simple-panel simple-assets-panel reveal">
-          <h2>Assets Marketplace</h2>
-          <p>Cards are clickable and unlock automatically after required verification.</p>
-          <div className="simple-assets-grid">
-            {DEMO_ASSETS.map((asset) => {
-              const unlocked = isRuleSatisfied(asset.requirement);
-              const purchased = Boolean(purchasedAssets[asset.tokenId]);
-              const statusLabel = assetStatusLabel(asset);
+          <div className="form-actions full-width">
+            <button className="btn" type="button" onClick={generateAssetDraftFromPreset} disabled={busy}>
+              Gen Asset
+            </button>
+            <button className="btn primary" type="submit" disabled={busy || !account || !verify.ok || !hasKybFlag}>
+              Add to queue
+            </button>
+            <span className="hint">Queue is wallet-scoped local draft. Use submit actions below to send onchain requests. Next preset: {nextGeneratedPresetName}</span>
+          </div>
+        </form>
 
-              return (
-                <article key={asset.tokenId} className={`asset-card ${unlocked ? "unlocked" : "locked"}`}>
-                  <img className="asset-image" src={resolveAssetImage(asset.image)} alt={asset.name} />
-                  <div className="asset-card-head">
-                    <div>
-                      <h3>{asset.name}</h3>
-                      <p>{asset.subname}</p>
-                    </div>
-                    <span className={`asset-status ${unlocked ? "ok" : "warn"}`}>{statusLabel}</span>
+        <div className="queue-wrap">
+          <div className="queue-head">
+            <h3>Queued Assets</h3>
+            <div className="queue-actions">
+              <button
+                className="btn"
+                type="button"
+                onClick={() => void submitAllQueuedAssets()}
+                disabled={busy || !account || !hasKybRequest || latestKybRequestId === "-"}
+              >
+                Submit all to CRE
+              </button>
+              <button className="btn" type="button" onClick={() => void refreshVerifiedAssets()} disabled={busy || !account}>
+                {refreshingAssets ? "Refreshing..." : "Refresh verified"}
+              </button>
+            </div>
+          </div>
+          <p className="hint">
+            KYB request ID: {hasKybRequest && latestKybRequestId !== "-" ? `#${latestKybRequestId}` : "missing"}.
+            Asset submissions use this ID in onchain broker events.
+          </p>
+          {registryQueue.length === 0 ? (
+            <p className="empty-state">No assets queued yet. Submit your first real asset above.</p>
+          ) : (
+            <div className="queue-table-wrap">
+              <table className="queue-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Company</th>
+                    <th>Deployments</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {registryQueue.map((item) => (
+                    <tr key={item.id}>
+                      <td>
+                        <strong>{item.name}</strong>
+                        <div className="table-sub">{new Date(item.createdAt).toLocaleString()}</div>
+                      </td>
+                      <td>
+                        <strong>{item.companyLegalName ?? "-"}</strong>
+                        <div className="table-sub">
+                          {(item.companyRef ?? "-") + " · " + (item.companyJurisdiction ?? "-")}
+                        </div>
+                      </td>
+                      <td>
+                        <div className="queue-deployments">
+                          {item.deployments.map((deployment, deploymentIndex) => (
+                            <div key={`${item.id}-${deploymentIndex}`} className="queue-deployment-item">
+                              <span>{chainName(deployment.chainId)} ({deployment.chainId})</span>
+                              <span>{deployment.tokenStandard}</span>
+                              <span className="mono">{shortAddress(deployment.tokenAddress)}</span>
+                              {deployment.tokenStandard !== "ERC20" ? <span>ID {deployment.tokenId}</span> : null}
+                              {deployment.assetRequestId ? <span>Req #{deployment.assetRequestId}</span> : null}
+                              {deployment.requestTxHash ? <span className="mono">reqTx {shortAddress(deployment.requestTxHash)}</span> : null}
+                              {deployment.verifyTxHash ? <span className="mono">verifyTx {shortAddress(deployment.verifyTxHash)}</span> : null}
+                            </div>
+                          ))}
+                        </div>
+                      </td>
+                      <td>
+                        <span className={`badge ${queueStatusBadgeClass(item.status)}`}>{item.status}</span>
+                        {item.lastError ? <div className="table-sub text-warn">{item.lastError}</div> : null}
+                      </td>
+                      <td>
+                        <div className="queue-row-actions">
+                          <button
+                            className="table-action"
+                            onClick={() => void submitQueuedAsset(item.id)}
+                            disabled={
+                              busy ||
+                              !account ||
+                              item.status === "submitting" ||
+                              item.status === "submitted" ||
+                              item.status === "verified"
+                            }
+                          >
+                            {item.status === "failed" ? "Retry submit" : "Submit"}
+                          </button>
+                          <button className="table-action" onClick={() => removeQueuedAsset(item.id)} disabled={busy || item.status === "submitting"}>
+                            Remove
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div className="verified-wrap">
+          <div className="queue-head">
+            <h3>Verified Assets</h3>
+            <span className={`badge ${verifiedAssets.length > 0 ? "ok" : "neutral"}`}>{verifiedAssets.length}</span>
+          </div>
+
+          {verifiedAssets.length === 0 ? (
+            <p className="empty-state">
+              No verified assets yet. Submit queued assets and wait for CRE to attest them in `AssetRegistry`.
+            </p>
+          ) : (
+            <div className="verified-grid">
+              {verifiedAssets.map((asset) => (
+                <article className="verified-card" key={asset.groupId}>
+                  <div className="verified-card-head">
+                    <strong>{asset.name}</strong>
+                    <span className="badge ok">{asset.deployments.length} network{asset.deployments.length > 1 ? "s" : ""}</span>
                   </div>
-                  <p className="asset-description">{asset.description}</p>
-                  <div className="asset-tags">
-                    <span>{asset.category}</span>
-                    <span>Chain {asset.chainId}</span>
-                    <span>{chainName(asset.chainId)}</span>
+                  <div className="verified-chip-row">
+                    {asset.deployments.map((deployment) => (
+                      <span className="pill ok" key={`${asset.groupId}-${deployment.chainId}-${deployment.assetKey}`}>
+                        {chainName(deployment.chainId)}
+                      </span>
+                    ))}
                   </div>
-                  <div className="asset-metrics">
+                  <dl className="verified-meta">
                     <div>
-                      <span>Price</span>
-                      <strong>${asset.priceUSDx}</strong>
+                      <dt>Owner</dt>
+                      <dd className="mono">{asset.owner}</dd>
                     </div>
                     <div>
-                      <span>Health</span>
-                      <strong>{asset.healthScore}</strong>
+                      <dt>Latest verified at</dt>
+                      <dd>{formatUnixTimestamp(asset.latestVerifiedAt)}</dd>
                     </div>
                     <div>
-                      <span>APR</span>
-                      <strong>{typeof asset.apr === "number" ? `${asset.apr}%` : "N/A"}</strong>
+                      <dt>Deployments</dt>
+                      <dd>{asset.deployments.length}</dd>
                     </div>
                     <div>
-                      <span>Supply</span>
-                      <strong>{asset.supplyForDemo.toLocaleString()}</strong>
+                      <dt>Metadata URI</dt>
+                      <dd className="mono">{asset.metadataUri || "-"}</dd>
                     </div>
-                  </div>
-                  <div className="asset-card-actions">
-                    <span className="asset-requirement">{ruleLabel(asset.requirement)}</span>
-                    <button className="simple-btn primary" onClick={() => void buyDemoAsset(asset)} disabled={busy || purchased || !unlocked}>
-                      {purchased ? "Owned" : unlocked ? "Buy" : "Locked"}
-                    </button>
-                  </div>
-                  <p className="asset-expire">Verification expires: {DEMO_VERIFICATION_EXPIRES}</p>
-                  <div className="asset-flag-row">
-                    {asset.requirement === "none" ? <span className="simple-check-badge ok">available</span> : null}
-                    {asset.requirement === "kyc" ? <span className={`simple-check-badge ${verify.ok ? "ok" : "warn"}`}>KYC</span> : null}
-                    {asset.requirement === "worldid" ? (
-                      <span className={`simple-check-badge ${worldIdVerified ? "ok" : "warn"}`}>World ID</span>
-                    ) : null}
-                    {asset.requirement === "both" ? (
-                      <>
-                        <span className={`simple-check-badge ${verify.ok ? "ok" : "warn"}`}>KYC</span>
-                        <span className={`simple-check-badge ${worldIdVerified ? "ok" : "warn"}`}>World ID</span>
-                      </>
-                    ) : null}
+                    <div>
+                      <dt>Metadata hash</dt>
+                      <dd className="mono">{asset.metadataHash || "-"}</dd>
+                    </div>
+                  </dl>
+
+                  <div className="verified-deployments">
+                    {asset.deployments.map((deployment) => (
+                      <div className="verified-deployment-item" key={`${deployment.assetKey}-${deployment.chainId}`}>
+                        <div className="verified-deployment-top">
+                          <strong>{chainName(deployment.chainId)} ({deployment.chainId})</strong>
+                          <span className="badge neutral">{deployment.tokenStandard}</span>
+                        </div>
+                        <div className="verified-deployment-grid">
+                          <span className="mono">contract: {deployment.tokenAddress}</span>
+                          <span>tokenId: {deployment.tokenId}</span>
+                          <span>kybReq: #{deployment.kybRequestId}</span>
+                          <span>verified: {formatUnixTimestamp(deployment.verifiedAt)}</span>
+                          <span className="mono">assetKey: {deployment.assetKey}</span>
+                          <span className="mono">verifyTx: {deployment.verifyTxHash || "-"}</span>
+                          <span>block: {deployment.verifyBlockNumber ?? "-"}</span>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </article>
-              );
-            })}
-          </div>
+              ))}
+            </div>
+          )}
+        </div>
       </section>
 
-      <section className="simple-panel networks-panel reveal">
-          <h2>Supported Networks</h2>
-          <p>Demo assets are distributed across testnets.</p>
-          <div className="network-grid">
-            {DEMO_NETWORKS.map((network) => (
-              <article key={network.chainId} className="network-card">
-                <strong>
-                  {network.name} ({network.chainId})
-                </strong>
-                <div className="network-links">
-                  <a href={network.explorer} target="_blank" rel="noreferrer">
-                    Explorer
-                  </a>
-                  <a href={network.faucet} target="_blank" rel="noreferrer">
-                    Faucet
-                  </a>
-                </div>
-              </article>
-            ))}
-          </div>
-      </section>
+      <footer className="status-bar card">
+        <span className="status-label">Status</span>
+        <span className="status-value">{status}</span>
+      </footer>
 
-      {simpleBusy ? (
-        <div className="simple-loading-backdrop">
-          <div className="simple-loading-card">
-            <div className="simple-spinner" />
-            <h3>{simpleProgress.title}</h3>
-            <p>{simpleProgress.message}</p>
-            <span>{status}</span>
-          </div>
+      {error ? (
+        <div className="toast toast-error" role="alert">
+          {error}
         </div>
       ) : null}
 
-      {simpleResultModal ? (
-        <div className="simple-result-backdrop">
-          <div className={`simple-result-card ${simpleResultModal.isError ? "is-error" : ""}`}>
-            <h3>{simpleResultModal.title}</h3>
-            <p>{simpleResultModal.message}</p>
-            <button className="simple-btn primary" onClick={() => setSimpleResultModal(null)}>
-              OK
-            </button>
+      {globalBusy ? (
+        <div className="loading-backdrop">
+          <div className="loading-card">
+            <div className="spinner" />
+            <h3>{progressCopy.title}</h3>
+            <p>{progressCopy.message}</p>
+            <span>{status}</span>
           </div>
         </div>
       ) : null}
 
       {sumsubModalOpen ? (
         <div className="modal-backdrop" onClick={() => setSumsubModalOpen(false)}>
-          <div className="modal-card reveal" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
             <div className="modal-head">
               <h3>Sumsub Verification</h3>
               <button className="btn" onClick={() => setSumsubModalOpen(false)}>

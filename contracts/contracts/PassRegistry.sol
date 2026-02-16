@@ -3,6 +3,8 @@ pragma solidity ^0.8.24;
 
 contract PassRegistry {
     uint256 public constant FLAG_HUMAN = 1 << 0;
+    uint256 public constant FLAG_WORLD_ID = 1 << 1;
+    uint256 public constant FLAG_KYB = 1 << 2;
 
     uint8 public constant REASON_OK = 0;
     uint8 public constant REASON_NO_ATTESTATION = 1;
@@ -156,6 +158,15 @@ contract PassRegistry {
     }
 
     function attest(address user, AttestationData calldata data) external onlyIssuer {
+        if ((data.flags & FLAG_KYB) == FLAG_KYB) {
+            Attestation memory current = attestations[user];
+            bool hasActiveKyc = current.exists &&
+                !current.revoked &&
+                (current.flags & FLAG_HUMAN) == FLAG_HUMAN &&
+                (current.expiration == 0 || current.expiration >= block.timestamp);
+            require(hasActiveKyc, "PassRegistry: kyb requires active kyc");
+        }
+
         attestations[user] = Attestation({
             flags: data.flags,
             expiration: data.expiration,
