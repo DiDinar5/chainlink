@@ -1,120 +1,118 @@
-# PassStore + Sumsub + Chainlink CRE (No Backend)
+# PassStore: CRE-Driven Verification + Onchain Asset Registry
 
-Monorepo with core components:
+No-backend monorepo where verification is orchestrated by onchain events + CRE worker.
 
-- `contracts/` - Solidity contracts (registry, broker, demo gated apps).
-- `cre/` - Chainlink CRE unified worker (SDK token issue + KYC sync polling in one loop).
-- `DON_FILES/` - Deployment-ready CRE/DON folder split into `TS/` workflows and `GO/` backup worker.
-- `frontend/` - React app for wallet flow, Sumsub WebSDK launch, and gated actions.
+## What Is Implemented
 
-The architecture is provider-agnostic: Sumsub is the first integrated KYC provider, but issuer workflows can be extended to other providers without changing the core gating pattern.
+- KYC via Sumsub with encrypted SDK token delivery onchain.
+- World ID request flow with CRE-side proof verification and onchain flag attestation.
+- KYB gate (currently stub UX in frontend, real onchain request + flag update through CRE).
+- Onchain `AssetRegistry` gated by KYB policy.
+- Frontend queue + submit-to-CRE + verified asset cards with tx/block metadata.
 
-## Architecture
+## Repository Structure
 
-1. User connects wallet in frontend.
-2. User generates an in-browser session keypair and stores only the session public key in `KycSessionBroker`.
-3. User calls `requestKyc(levelName)`.
-4. Unified CRE worker pass `IssueSdkToken` catches `KycRequested`, asks Sumsub for SDK token, encrypts token for user key, writes ciphertext onchain.
-5. Frontend reads ciphertext, decrypts locally with session secret key, and launches Sumsub WebSDK.
-6. User clicks `Sync + refresh status`, which calls `KycSessionBroker.requestKycSync()` and emits `KycSyncRequested`.
-7. The same unified CRE worker pass `SyncKycStatus` catches `KycSyncRequested`, fetches Sumsub status, and updates `PassRegistry` (`attest`/`revoke`).
-8. Demo contracts (`AccessPass`, `ClaimDrop`) gate calls via `PassRegistry.verifyUser`.
+- `contracts/` - smart contracts and deployment scripts.
+- `cre/` - unified TypeScript worker (local CRE role).
+- `frontend/` - React app for wallet, KYC, World ID, KYB, and asset intake.
+- `DON_FILES/` - templates/runbook for production DON packaging:
+  - `DON_FILES/TS/` - TypeScript workflow templates for `cre workflow deploy`.
+  - `DON_FILES/GO/` - backup local Go worker implementation (KYC-focused baseline).
 
-## Quick Start
+## Local Quick Start
 
-1. Install deps:
+1. Install dependencies:
 
 ```bash
 npm install
 ```
 
-2. Start local chain:
+2. Start local chain (terminal #1):
 
 ```bash
 npm run node:local -w contracts
 ```
 
-3. Configure env files:
+3. Prepare env files:
 
 - `contracts/.env.example` -> `contracts/.env`
 - `cre/.env.example` -> `cre/.env`
 - `frontend/.env.example` -> `frontend/.env`
-- optional for WalletConnect in `frontend/.env`:
-  - `VITE_WC_PROJECT_ID`
-  - `VITE_RPC_URL`
 
 4. Deploy contracts:
 
 ```bash
-npm run compile -w contracts
 npm run deploy:local -w contracts
 ```
 
-If you are upgrading from an older revision, redeploy is required because `KycSessionBroker` ABI changed (`requestKycSync`, `KycSyncRequested`).
+5. Copy fresh addresses from deploy output:
 
-5. Copy deployed addresses:
-
-- from deploy output into `frontend/.env`:
+- to `frontend/.env`:
   - `VITE_PASS_REGISTRY`
   - `VITE_KYC_BROKER`
+  - `VITE_ASSET_REGISTRY`
   - `VITE_ACCESS_PASS`
   - `VITE_CLAIM_DROP`
-- from deploy output into `cre/.env`:
+- to `cre/.env`:
   - `PASS_REGISTRY_ADDRESS`
   - `KYC_BROKER_ADDRESS`
-- set `CRE_SIGNER_PK` in `cre/.env` and allowlist that address in contracts deploy (`CRE_ISSUER` in `contracts/.env`) or via admin tx.
-- set `KYC_LEVEL_NAME` in `cre/.env` to the exact Sumsub level name from your dashboard.
+  - `ASSET_REGISTRY_ADDRESS`
 
-6. Fill Sumsub settings in `cre/.env`:
+6. Fill runtime credentials:
 
-- `SUMSUB_APP_TOKEN`
-- `SUMSUB_SECRET_KEY`
-- `SUMSUB_USER_ID_MODE` (`wallet_request` recommended for sandbox demos to avoid instant "already approved")
-- optional endpoint overrides if your Sumsub project uses different paths.
+- `cre/.env`: `SUMSUB_APP_TOKEN`, `SUMSUB_SECRET_KEY`, `CRE_SIGNER_PK`
+- `frontend/.env`: `VITE_WC_PROJECT_ID`
+- World ID values (staging):
+  - `VITE_WORLD_ID_APP_ID`, `VITE_WORLD_ID_ACTION`
+  - `WORLD_ID_APP_ID`, `WORLD_ID_ACTION`
 
-7. Start CRE worker:
+7. Start CRE worker (terminal #2):
 
 ```bash
 npm run dev:worker -w cre
 ```
 
-For local UX, use fast issue polling (`POLL_INTERVAL_MS=5000`) and slower status polling (`SYNC_POLL_INTERVAL_MS=30000-120000`) in `cre/.env`.
-
-8. Start frontend:
+8. Start frontend (terminal #3):
 
 ```bash
 npm run dev -w frontend
 ```
 
-## How To Use (E2E)
+## E2E Test Flow
 
-1. Open frontend and click `Connect wallet`.
-2. Click `Enable encryption` (creates session keypair in browser and saves session public key onchain).
-3. Click `Start verification`.
-4. Wait for `IssueSdkToken` worker to store ciphertext in broker packet.
-5. Frontend decrypts packet locally with session secret key and launches Sumsub WebSDK.
-6. In Sumsub Sandbox, simulate review result (`GREEN` or `RED`).
-7. Click `Sync + refresh status` (this sends `requestKycSync()` and then polls onchain view):
-   - `GREEN` -> `PassRegistry.attest`
-   - `RED` -> `PassRegistry.revoke`
-8. Try demo actions:
-   - `Mint AccessPass`
-   - `Claim Drop`
+1. Connect wallet.
+2. Enable encryption.
+3. Start KYC and finish Sumsub flow.
+4. Click `Sync + refresh` until KYC flag is green.
+5. Start World ID (in staging use simulator flow if account is not Orb-verified).
+6. Start KYB stub and confirm onchain KYB request is created.
+7. Wait for KYB flag to become green.
+8. Add asset to queue and click submit.
+9. After CRE processes `AssetVerificationRequested`, the item appears in `Verified Assets` with tx hash/block.
 
-## Repository Map
+## Important Notes
 
-- `contracts/contracts/PassRegistry.sol` - Attestations, policies, `verifyUser`.
-- `contracts/contracts/KycSessionBroker.sol` - Encryption keys, KYC requests, encrypted packets.
-- `contracts/contracts/AccessPass.sol` - Mint-gated demo app.
-- `contracts/contracts/ClaimDrop.sol` - Claim-gated demo app.
-- `cre/src/workflows/worker.ts` - Unified worker that performs token issuance pass and KYC sync pass.
-- `frontend/src/App.tsx` - Wallet UX + session-key decrypt + WebSDK + demo actions.
-- `frontend/src/lib/sessionCrypto.ts` - Session keypair generation and local decrypt helpers.
+- Frontend queue accepts draft-like values, but onchain submit requires valid non-zero EVM token addresses.
+- World ID modal can show success before CRE final attestation; source of truth is onchain flags and worker logs.
+- If contracts are redeployed, restart worker and frontend so both use fresh addresses.
+- No plaintext Sumsub token is stored onchain; only encrypted packet.
 
-## Notes
+## Useful Commands
 
-- No custom backend and no custom DB are used.
-- Sumsub secrets stay in CRE secrets/env only.
-- Onchain SDK token packets are encrypted; plaintext is only available to wallet owner.
-- This repository is MVP-oriented and intentionally keeps PII offchain/onchain storage minimal.
-- In this sandbox, Hardhat may fail downloading remote solc binaries. Solidity source is still checked via local `solcjs`.
+```bash
+# Contracts tests
+npm run test -w contracts
+
+# Build checks
+npm run build -w contracts
+npm run build -w cre
+npm run build -w frontend
+```
+
+## DON Packaging
+
+For production DON-style workflow packaging and deploy scripts, see:
+
+- `DON_FILES/README.md`
+- `DON_FILES/TS/README.md`
+- `DON_FILES/GO/README.md`

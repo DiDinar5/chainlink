@@ -1,48 +1,78 @@
 # DON_FILES/TS
 
-Шаблонный набор файлов для деплоя PassStore workflows в Chainlink CRE/DON.
+TypeScript workflow package for Chainlink CRE/DON deployment.
 
-## Что внутри
+## Included Workflows
 
-- `project.yaml` - target-конфигурации для CLI (`staging-settings`, `production-settings`).
-- `.env.example` - переменные для link-key и CLI-секретов.
-- `secrets.production.yaml` - шаблон загрузки Sumsub секретов в DON Vault.
-- `workflows/issue-sdk-token/` - workflow для события `KycRequested`.
-- `workflows/sync-kyc-status/` - workflow для синка статуса KYC по событию `KycSyncRequested`.
-- `scripts/deploy-all.sh` - быстрый runbook-команды.
+- `workflows/issue-sdk-token`  
+  Trigger: `KycRequested`  
+  Action: fetch Sumsub SDK token, encrypt for wallet session key, store packet onchain.
 
-## Важно
+- `workflows/sync-kyc-status`  
+  Trigger: `KycSyncRequested`  
+  Action: sync Sumsub decision -> `PassRegistry.attest/revoke`.
 
-Это **DON-шаблоны**. Их нужно заполнить вашими адресами/chain и дописать бизнес-логику в `main.ts` (там отмечено `TODO`).
+- `workflows/verify-world-id`  
+  Trigger: `WorldIdVerificationRequested`  
+  Action: verify proof with World ID API and attest World ID flag in registry.
 
-Текущий локальный `cre/src/workflows/worker.ts` сюда не переносится 1:1, потому что DON workflow работает через CRE handlers/triggers.
+- `workflows/sync-kyb-status`  
+  Trigger: `KybRequested`  
+  Action: run KYB provider logic (or policy stub) and set KYB flag.
 
-## Быстрый старт
+- `workflows/verify-asset`  
+  Trigger: `AssetVerificationRequested`  
+  Action: call `AssetRegistry.verifyAsset(...)` after KYB gating checks.
 
-1. Перейдите в `DON_FILES/TS`.
-2. Скопируйте `.env.example` -> `.env` и заполните.
-3. Обновите `project.yaml` (RPC, owner, target).
-4. Обновите `config.production.json` в обоих workflow.
-5. Загрузите secrets:
+## Files
+
+- `project.yaml` - targets (`staging-settings`, `production-settings`).
+- `.env.example` - minimal env for CLI + secrets upload.
+- `secrets.production.yaml` - DON Vault mapping for secrets.
+- `scripts/simulate-all.sh` - simulate all workflows.
+- `scripts/deploy-all.sh` - deploy + activate all workflows.
+
+## Important
+
+- These are deployment templates.  
+  `main.ts` files intentionally keep TODO placeholders to be wired against your exact `cre init workflow typescript` scaffold.
+- Keep field names aligned with CLI scaffold generated in your environment.
+- Contract addresses and flags in `config.*.json` must match your latest deploy.
+
+## Quick Start
+
+1. Enter folder:
+
+```bash
+cd DON_FILES/TS
+```
+
+2. Prepare env:
+
+```bash
+cp .env.example .env
+```
+
+3. Fill/update:
+
+- `project.yaml` RPC endpoints
+- `workflows/*/config.staging.json`
+- `workflows/*/config.production.json`
+
+4. Upload secrets:
 
 ```bash
 cre secrets create ./secrets.production.yaml --target production-settings
 ```
 
-6. Деплой + activate (по каждому workflow):
+5. Simulate all:
 
 ```bash
-cre workflow deploy ./workflows/issue-sdk-token --target production-settings
-cre workflow activate ./workflows/issue-sdk-token --target production-settings
-
-cre workflow deploy ./workflows/sync-kyc-status --target production-settings
-cre workflow activate ./workflows/sync-kyc-status --target production-settings
+./scripts/simulate-all.sh staging-settings
 ```
 
-## Рекомендация
-
-Сначала прогоните каждый workflow через:
+6. Deploy all:
 
 ```bash
-cre workflow simulate ./workflows/<name> --target staging-settings
+./scripts/deploy-all.sh production-settings
 ```

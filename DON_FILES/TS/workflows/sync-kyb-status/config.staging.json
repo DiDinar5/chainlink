@@ -1,0 +1,10 @@
+{
+  "chainSelectorName": "ethereum-testnet-sepolia",
+  "passRegistryAddress": "0x0000000000000000000000000000000000000000",
+  "kycBrokerAddress": "0x0000000000000000000000000000000000000000",
+  "attestationExpirationDays": 180,
+  "flagHuman": 1,
+  "flagKyb": 4,
+  "riskScore": 0,
+  "subjectType": 1
+}

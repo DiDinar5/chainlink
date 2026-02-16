@@ -1,0 +1,10 @@
+{
+  "chainSelectorName": "ethereum-testnet-sepolia",
+  "passRegistryAddress": "0x0000000000000000000000000000000000000000",
+  "kycBrokerAddress": "0x0000000000000000000000000000000000000000",
+  "worldIdAppId": "app_staging_your_app_id",
+  "worldIdAction": "your-action",
+  "worldIdVerifyEndpoint": "https://developer.worldcoin.org/api/v2/verify",
+  "flagWorldId": 2,
+  "flagHuman": 1
+}

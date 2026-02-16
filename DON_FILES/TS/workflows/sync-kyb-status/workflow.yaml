@@ -1,0 +1,11 @@
+# DON workflow descriptor (template)
+
+user-workflow:
+  path: ./main.ts
+  workflows:
+    staging-settings:
+      workflow-name: passstore-sync-kyb-status-staging
+      config-file: ./config.staging.json
+    production-settings:
+      workflow-name: passstore-sync-kyb-status
+      config-file: ./config.production.json

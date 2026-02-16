@@ -1,0 +1,11 @@
+# DON workflow descriptor (template)
+
+user-workflow:
+  path: ./main.ts
+  workflows:
+    staging-settings:
+      workflow-name: passstore-verify-world-id-staging
+      config-file: ./config.staging.json
+    production-settings:
+      workflow-name: passstore-verify-world-id
+      config-file: ./config.production.json

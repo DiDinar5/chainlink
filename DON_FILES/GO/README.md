@@ -1,12 +1,26 @@
-# DON_FILES/GO (Backup Implementation)
+# DON_FILES/GO (Backup Worker)
 
-Backup Chainlink-CRE-style workers implemented in Go.
+Go fallback implementation for local/backup operation.
 
-## What is inside
+## Current Coverage
 
-- `cmd/worker` - unified worker:
-  - pass `IssueSdkToken`: listens `KycRequested`, gets Sumsub SDK token, encrypts for user session key, stores packet onchain.
-  - pass `SyncKycStatus`: polls Sumsub and writes `attest` / `revoke` in `PassRegistry`.
+- `IssueSdkToken` pass:
+  - listens `KycRequested`
+  - generates Sumsub SDK token
+  - encrypts for wallet session key
+  - stores packet in `KycSessionBroker`
+
+- `SyncKycStatus` pass:
+  - checks Sumsub review status
+  - writes `PassRegistry.attest` / `PassRegistry.revoke`
+
+## Not Yet Implemented Here
+
+- World ID verification pass
+- KYB sync pass
+- Asset verification pass (`AssetRegistry`)
+
+For full latest feature coverage use `cre/` (TypeScript worker) or DON TS workflows under `DON_FILES/TS`.
 
 ## Setup
 
@@ -16,9 +30,19 @@ Backup Chainlink-CRE-style workers implemented in Go.
 cp .env.example .env
 ```
 
-2. Fill variables (especially `SUMSUB_APP_TOKEN`, `SUMSUB_SECRET_KEY`).
-   - `POLL_INTERVAL_MS` controls how fast KYC requests are picked up (recommended `5000` locally).
-   - `SYNC_POLL_INTERVAL_MS` controls Sumsub status sync cadence (recommended `30000-120000`).
+2. Fill required values:
+
+- `RPC_URL`
+- `CRE_SIGNER_PK`
+- `KYC_BROKER_ADDRESS`
+- `PASS_REGISTRY_ADDRESS`
+- `SUMSUB_APP_TOKEN`
+- `SUMSUB_SECRET_KEY`
+
+3. Tune loop intervals if needed:
+
+- `POLL_INTERVAL_MS` (request pickup)
+- `SYNC_POLL_INTERVAL_MS` (status sync cadence)
 
 ## Run
 
@@ -36,6 +60,6 @@ go run ./cmd/worker --loop
 
 ## Notes
 
-- Designed as reserve implementation for the same onchain contracts used by `cre/` (TypeScript version).
-- Sumsub API secrets must stay in env/secret manager only.
-- KYC level name is controlled by ENV `KYC_LEVEL_NAME` (not by UI-provided value).
+- This implementation is intentionally conservative and focused on KYC baseline.
+- Keep secrets only in env/secret manager.
+- `KYC_LEVEL_NAME` is controlled by env, not UI input.

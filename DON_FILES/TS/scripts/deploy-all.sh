@@ -2,15 +2,26 @@
 set -euo pipefail
 
 TARGET="${1:-production-settings}"
+WORKFLOWS=(
+  "issue-sdk-token"
+  "sync-kyc-status"
+  "verify-world-id"
+  "sync-kyb-status"
+  "verify-asset"
+)
 
 echo "Target: $TARGET"
 
-echo "==> Deploy IssueSdkToken"
-cre workflow deploy ./workflows/issue-sdk-token --target "$TARGET"
-cre workflow activate ./workflows/issue-sdk-token --target "$TARGET"
+for workflow in "${WORKFLOWS[@]}"; do
+  path="./workflows/$workflow"
+  if [[ ! -d "$path" ]]; then
+    echo "Missing workflow folder: $path"
+    exit 1
+  fi
 
-echo "==> Deploy SyncKycStatus"
-cre workflow deploy ./workflows/sync-kyc-status --target "$TARGET"
-cre workflow activate ./workflows/sync-kyc-status --target "$TARGET"
+  echo "==> Deploy $workflow"
+  cre workflow deploy "$path" --target "$TARGET"
+  cre workflow activate "$path" --target "$TARGET"
+done
 
 echo "Done"
