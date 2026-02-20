@@ -2,6 +2,8 @@ import { PrivacyBanner } from "./PrivacyBanner";
 import { AccessLevelCard } from "./AccessLevelCard";
 import { ActivityLog } from "./ActivityLog";
 import { Wallet, TrendingUp, Shield } from "lucide-react";
+import { useAppKitAccount } from "@reown/appkit/react";
+import { useVerification } from "../../lib/verificationContext";
 
 const activityEntries = [
   {
@@ -37,62 +39,69 @@ const activityEntries = [
 ];
 
 export function InvestorDashboard() {
+  const { address, isConnected } = useAppKitAccount();
+  const { accessLevel } = useVerification();
+
+  const verificationLabel = accessLevel === "full" ? "Level 2" : accessLevel === "kyc" || accessLevel === "worldid" ? "Level 1" : "None";
+
   return (
-    <div className="min-h-screen bg-[#F9FAFB]">
+    <div className="min-h-screen bg-[#F9FAFB] dark:bg-[#111827]">
       <div className="mx-auto max-w-7xl px-6 py-8">
         {/* Page Title */}
         <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h1 className="font-['Inter'] text-[1.75rem] tracking-tight text-[#111827]" style={{ fontWeight: 700 }}>
+            <h1 className="font-['Inter'] text-[1.75rem] tracking-tight text-[#111827] dark:text-[#F9FAFB]" style={{ fontWeight: 700 }}>
               Investor Portal
             </h1>
-            <p className="mt-1 font-['Inter'] text-[0.9375rem] text-[#6B7280]" style={{ fontWeight: 400 }}>
+            <p className="mt-1 font-['Inter'] text-[0.9375rem] text-[#6B7280] dark:text-[#9CA3AF]" style={{ fontWeight: 400 }}>
               Manage your Access Pass and RWA verification levels
             </p>
           </div>
-          <div className="flex gap-3">
-            <div className="flex items-center gap-2 rounded-xl border border-[#E5E7EB] bg-white px-4 py-2.5">
-              <Wallet className="h-4 w-4 text-[#6B7280]" />
-              <span className="font-['JetBrains_Mono'] text-[0.8125rem] text-[#374151]" style={{ fontWeight: 500 }}>
-                0x7f2B...9c4D
+          {isConnected && address && (
+            <div className="flex items-center gap-2 rounded-xl border border-[#E5E7EB] bg-white px-4 py-2.5 dark:border-[#374151] dark:bg-[#1F2937]">
+              <Wallet className="h-4 w-4 text-[#6B7280] dark:text-[#9CA3AF]" />
+              <span className="font-['JetBrains_Mono'] text-[0.8125rem] text-[#374151] dark:text-[#E5E7EB]" style={{ fontWeight: 500 }}>
+                {address.slice(0, 6)}...{address.slice(-4)}
               </span>
               <span className="h-2 w-2 rounded-full bg-[#10B981]" />
             </div>
-          </div>
+          )}
         </div>
 
         {/* Stats Row */}
         <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <div className="rounded-xl border border-[#E5E7EB] bg-white p-5">
+          <div className="rounded-xl border border-[#E5E7EB] bg-white p-5 dark:border-[#374151] dark:bg-[#1F2937]">
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#10B981]/10">
                 <Shield className="h-5 w-5 text-[#10B981]" />
               </div>
               <div>
                 <p className="font-['Inter'] text-[0.75rem] text-[#9CA3AF]" style={{ fontWeight: 500 }}>Verification Level</p>
-                <p className="font-['Inter'] text-[1.25rem] text-[#111827]" style={{ fontWeight: 700 }}>Level 1</p>
+                <p className="font-['Inter'] text-[1.25rem] text-[#111827] dark:text-[#F9FAFB]" style={{ fontWeight: 700 }}>{verificationLabel}</p>
               </div>
             </div>
           </div>
-          <div className="rounded-xl border border-[#E5E7EB] bg-white p-5">
+          <div className="rounded-xl border border-[#E5E7EB] bg-white p-5 dark:border-[#374151] dark:bg-[#1F2937]">
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#3B82F6]/10">
                 <TrendingUp className="h-5 w-5 text-[#3B82F6]" />
               </div>
               <div>
                 <p className="font-['Inter'] text-[0.75rem] text-[#9CA3AF]" style={{ fontWeight: 500 }}>Assets Accessible</p>
-                <p className="font-['Inter'] text-[1.25rem] text-[#111827]" style={{ fontWeight: 700 }}>12 of 18</p>
+                {/* TODO: integrate CRE / read from assetRegistry */}
+                <p className="font-['Inter'] text-[1.25rem] text-[#111827] dark:text-[#F9FAFB]" style={{ fontWeight: 700 }}>18 of 52</p>
               </div>
             </div>
           </div>
-          <div className="rounded-xl border border-[#E5E7EB] bg-white p-5">
+          <div className="rounded-xl border border-[#E5E7EB] bg-white p-5 dark:border-[#374151] dark:bg-[#1F2937]">
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#F59E0B]/10">
                 <Wallet className="h-5 w-5 text-[#F59E0B]" />
               </div>
               <div>
                 <p className="font-['Inter'] text-[0.75rem] text-[#9CA3AF]" style={{ fontWeight: 500 }}>Access Pass</p>
-                <p className="font-['Inter'] text-[1.25rem] text-[#111827]" style={{ fontWeight: 700 }}>#4829</p>
+                {/* TODO: read from accessPass contract */}
+                <p className="font-['Inter'] text-[1.25rem] text-[#111827] dark:text-[#F9FAFB]" style={{ fontWeight: 700 }}>#4829</p>
               </div>
             </div>
           </div>

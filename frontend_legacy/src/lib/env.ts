@@ -26,13 +26,7 @@ export const env = {
   accessPass: requireEnv("VITE_ACCESS_PASS"),
   claimDrop: requireEnv("VITE_CLAIM_DROP"),
   creIssuer: import.meta.env.VITE_CRE_ISSUER as string | undefined,
-  walletConnectProjectId: (() => {
-    const id =
-      (import.meta.env.VITE_WALLET_CONNECT_PROJECT_ID as string)?.trim() ||
-      (import.meta.env.VITE_WC_PROJECT_ID as string)?.trim();
-    if (!id) throw new Error("Set VITE_WALLET_CONNECT_PROJECT_ID or VITE_WC_PROJECT_ID in .env");
-    return id;
-  })(),
+  walletConnectProjectId: requireEnv("VITE_WC_PROJECT_ID"),
   rpcUrl: import.meta.env.VITE_RPC_URL as string | undefined,
   worldIdAppId: optionalEnv("VITE_WORLD_ID_APP_ID"),
   worldIdAction: optionalEnv("VITE_WORLD_ID_ACTION"),
