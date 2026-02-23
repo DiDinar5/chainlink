@@ -4110,8 +4110,22 @@ export default function App() {
             >
               Submit all to CRE
             </button>
-            <button className="btn" type="button" onClick={() => void refreshVerifiedAssets()} disabled={busy || !account || assetRegistryIntakeLocked}>
-              {refreshingAssets ? "Refreshing..." : "Refresh verified"}
+            <button
+              className="btn refresh-btn"
+              type="button"
+              onClick={() => void refreshVerifiedAssets()}
+              disabled={busy || refreshingAssets || !account || assetRegistryIntakeLocked}
+              aria-busy={refreshingAssets}
+            >
+              <span className="refresh-btn-label" aria-live="polite">
+                <span className={`refresh-btn-state${refreshingAssets ? " is-hidden" : ""}`} aria-hidden={refreshingAssets}>
+                  Refresh verified
+                </span>
+                <span className={`refresh-btn-state${refreshingAssets ? "" : " is-hidden"}`} aria-hidden={!refreshingAssets}>
+                  <span className="btn-spinner" aria-hidden="true" />
+                  Refreshing...
+                </span>
+              </span>
             </button>
           </div>
         </div>
@@ -4142,15 +4156,24 @@ export default function App() {
               </div>
               <span className={`badge ${verifiedAssets.length > 0 ? "ok" : "neutral"}`}>{verifiedAssets.length}</span>
               <button
-                className="btn"
+                className="btn refresh-btn"
                 type="button"
                 onClick={() => {
                   setResolvedAssetMetadataByUri({});
                   refreshAssetsGallery();
                 }}
-                disabled={busy || !canReadCurrentAssetsView}
+                disabled={busy || refreshingAssets || !canReadCurrentAssetsView}
+                aria-busy={refreshingAssets}
               >
-                {refreshingAssets ? "Refreshing..." : "Refresh"}
+                <span className="refresh-btn-label" aria-live="polite">
+                  <span className={`refresh-btn-state${refreshingAssets ? " is-hidden" : ""}`} aria-hidden={refreshingAssets}>
+                    Refresh
+                  </span>
+                  <span className={`refresh-btn-state${refreshingAssets ? "" : " is-hidden"}`} aria-hidden={!refreshingAssets}>
+                    <span className="btn-spinner" aria-hidden="true" />
+                    Refreshing...
+                  </span>
+                </span>
               </button>
             </div>
           </div>
@@ -4165,7 +4188,6 @@ export default function App() {
             <div className="verified-grid">
               {verifiedAssets.map((asset) => {
                 const metadataPreview = resolvedAssetMetadataByUri[asset.metadataUri];
-                const metadataHttpUrl = metadataPreview?.metadataHttpUrl || contentUriToHttpUrl(asset.metadataUri);
                 const imageHttpUrl = metadataPreview?.imageHttpUrl || "";
                 const inlineImageDataUrl = metadataPreview?.inlineImageDataUrl || "";
                 const previewImageUrl = inlineImageDataUrl || imageHttpUrl;
@@ -4198,6 +4220,10 @@ export default function App() {
                 const companySiteUrl = externalHttpUrl(
                   metadataCompanyWebsite || asset.companyWebsite || cardCompanyProfileFallback?.website || ""
                 );
+                const showVerifiedCardLinks =
+                  Boolean(companySiteUrl) ||
+                  metadataPreview?.status === "loading" ||
+                  metadataPreview?.status === "error";
                 const companyMeta = [
                   metadataCompanyRef || asset.companyRef || cardCompanyProfileFallback?.companyRef,
                   metadataCompanyJurisdiction || asset.companyJurisdiction || cardCompanyProfileFallback?.jurisdiction
@@ -4220,6 +4246,7 @@ export default function App() {
                     ) : (
                       <div className="verified-card-media-placeholder">No preview</div>
                     )}
+                    <span className="badge ok verified-card-media-badge">Verified</span>
                   </div>
 
                   <div className="verified-card-body">
@@ -4228,7 +4255,6 @@ export default function App() {
                       <strong>{cardTitle}</strong>
                       {cardDescription ? <p className="verified-card-subtitle">{cardDescription}</p> : null}
                     </div>
-                    <span className="badge ok">Verified</span>
                   </div>
 
                   <div className="verified-chip-row">
@@ -4299,37 +4325,17 @@ export default function App() {
 
                   {companyMeta ? <div className="verified-card-submeta">{companyMeta}</div> : null}
 
-                  <div className="verified-card-links">
-                    {metadataHttpUrl ? (
-                      <a
-                        className="verified-card-link"
-                        href={metadataHttpUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        title={asset.metadataHash ? `metadataHash: ${asset.metadataHash}` : undefined}
-                      >
-                        Open metadata
-                      </a>
-                    ) : null}
-                    {previewImageUrl ? (
-                      <a
-                        className="verified-card-link"
-                        href={previewImageUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        title={inlineImageDataUrl ? "Opens inline SVG preview from metadata.image_data" : undefined}
-                      >
-                        Open image
-                      </a>
-                    ) : null}
-                    {companySiteUrl ? (
-                      <a className="verified-card-link" href={companySiteUrl} target="_blank" rel="noreferrer">
-                        Company site
-                      </a>
-                    ) : null}
-                    {metadataPreview?.status === "loading" ? <span className="verified-card-meta-status">Loading IPFS metadata…</span> : null}
-                    {metadataPreview?.status === "error" ? <span className="verified-card-meta-status">Metadata unavailable</span> : null}
-                  </div>
+                  {showVerifiedCardLinks ? (
+                    <div className="verified-card-links">
+                      {companySiteUrl ? (
+                        <a className="verified-card-link" href={companySiteUrl} target="_blank" rel="noreferrer">
+                          Company Site
+                        </a>
+                      ) : null}
+                      {metadataPreview?.status === "loading" ? <span className="verified-card-meta-status">Loading IPFS metadata…</span> : null}
+                      {metadataPreview?.status === "error" ? <span className="verified-card-meta-status">Metadata unavailable</span> : null}
+                    </div>
+                  ) : null}
 
                   <div className="verified-card-actions">
                     <span className={`pill ${buyerVerificationRequirementBadgeClass(buyerRequirement)} verified-buy-pill`}>
