@@ -52,6 +52,18 @@ function worldIdErrorMessage(statusCode: number, rawBody: string): string {
   }
 }
 
+function parseVerificationExpirations(raw: readonly unknown[]): {
+  humanExpiration: number;
+  worldIdExpiration: number;
+  kybExpiration: number;
+} {
+  return {
+    humanExpiration: Number(raw[0] ?? 0),
+    worldIdExpiration: Number(raw[1] ?? 0),
+    kybExpiration: Number(raw[2] ?? 0)
+  };
+}
+
 export async function verifyWorldIdProof(userAddress: string, proof: WorldIdProof): Promise<void> {
   if (!config.worldIdAppId || !config.worldIdAction) {
     throw new Error("World ID is not configured in CRE env");
@@ -86,8 +98,8 @@ export async function attestWorldIdFlag(
 
   const registry = getRegistry();
   const current = await registry.attestations(normalizedAddress);
+  const currentExps = parseVerificationExpirations((await registry.verificationExpirations(normalizedAddress)) as readonly unknown[]);
   const currentFlags = BigInt(current[0]);
-  const currentExpiration = Number(current[1]);
   const currentRiskScore = Number(current[2]);
   const currentSubjectType = Number(current[3]);
   const currentRevoked = Boolean(current[6]);
@@ -98,22 +110,28 @@ export async function attestWorldIdFlag(
   }
 
   const nextFlags = currentFlags | config.flagWorldId;
-  if (currentExists && nextFlags === currentFlags) {
+  const now = Math.floor(Date.now() / 1000);
+  const hasActiveWorldId =
+    currentExists &&
+    !currentRevoked &&
+    (currentFlags & config.flagWorldId) === config.flagWorldId &&
+    (currentExps.worldIdExpiration === 0 || currentExps.worldIdExpiration >= now);
+  if (hasActiveWorldId && nextFlags === currentFlags) {
     return { alreadyVerified: true, flags: nextFlags.toString() };
   }
 
-  const now = Math.floor(Date.now() / 1000);
   const fallbackExpiration = now + config.attestationExpirationDays * 24 * 60 * 60;
-  const nextExpiration = currentExpiration > now ? currentExpiration : fallbackExpiration;
   const nextRiskScore = currentExists ? currentRiskScore : 0;
   const nextSubjectType = currentExists && currentSubjectType > 0 ? currentSubjectType : 1;
   const refHash = ethers.keccak256(
     ethers.toUtf8Bytes(`worldid:${normalizedAddress.toLowerCase()}:${proof.nullifier_hash}:${Date.now()}`)
   );
 
-  const tx = await registry.attest(normalizedAddress, {
+  const tx = await registry.attestV2(normalizedAddress, {
     flags: nextFlags,
-    expiration: BigInt(nextExpiration),
+    humanExpiration: (currentFlags & config.flagHuman) === config.flagHuman ? BigInt(currentExps.humanExpiration) : 0n,
+    worldIdExpiration: BigInt(Math.max(currentExps.worldIdExpiration, fallbackExpiration)),
+    kybExpiration: (currentFlags & config.flagKyb) === config.flagKyb ? BigInt(currentExps.kybExpiration) : 0n,
     riskScore: nextRiskScore,
     subjectType: nextSubjectType,
     refHash
@@ -126,4 +144,3 @@ export async function attestWorldIdFlag(
     txHash: tx.hash
   };
 }
-

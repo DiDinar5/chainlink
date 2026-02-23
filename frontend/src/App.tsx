@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { BrowserProvider, Contract, Interface, ethers } from "ethers";
+import { type SyntheticEvent, useEffect, useMemo, useRef, useState } from "react";
+import { BrowserProvider, Contract, Interface, JsonRpcProvider, ethers } from "ethers";
 import { useAppKit, useAppKitAccount, useAppKitProvider } from "@reown/appkit/react";
 import { IDKitWidget, IErrorState, ISuccessResult, VerificationLevel } from "@worldcoin/idkit";
 import { assetRegistryAbi } from "./abi/assetRegistry";
@@ -22,6 +22,12 @@ type AttestationSnapshot = {
   subjectType: number;
 };
 
+type VerificationExpirationsSnapshot = {
+  humanExpiration: number;
+  worldIdExpiration: number;
+  kybExpiration: number;
+};
+
 type PendingDecryptPacket = {
   requestId: string;
   ciphertextHex: string;
@@ -32,11 +38,14 @@ type PendingDecryptPacket = {
 type OnchainSnapshot = {
   verify: VerifySnapshot;
   worldIdVerified: boolean;
+  hasActiveKybFlag: boolean;
   hasKybRequest: boolean;
   latestKybRequestId: string;
 };
 
 type WalletProviderLike = unknown;
+type AssetReadProvider = BrowserProvider | JsonRpcProvider;
+type AssetsViewMode = "all" | "mine";
 
 type SumsubStatusSnapshot = {
   reviewStatus: string;
@@ -48,6 +57,9 @@ type SdkPacketStage = "idle" | "requested" | "token_ready" | "consumed";
 type KybStubStatus = "not_started" | "in_review" | "verified";
 
 type TokenStandard = "ERC20" | "ERC721" | "ERC1155";
+type BuyerVerificationRequirement = "open" | "kyc" | "worldid" | "kyc_worldid";
+
+type AppTab = "assets" | "personal" | "business";
 
 type NetworkOption = {
   chainId: number;
@@ -93,6 +105,7 @@ type AssetDraft = {
   metadataUri: string;
   metadataHash: string;
   notes: string;
+  buyerVerificationRequirement: BuyerVerificationRequirement;
   deployments: AssetDeploymentDraft[];
 };
 
@@ -107,6 +120,8 @@ type RegistryRecord = {
   companyLegalName?: string;
   companyRef?: string;
   companyJurisdiction?: string;
+  companyWebsite?: string;
+  buyerVerificationRequirement?: BuyerVerificationRequirement;
   kybVerifiedAt?: number;
   kybRequestId?: string;
   status: RegistryRecordStatus;
@@ -152,13 +167,47 @@ type VerifiedAssetCard = {
   latestVerifiedAt: number;
   latestUpdatedAt: number;
   deployments: VerifiedAssetDeployment[];
+  companyLegalName?: string;
+  companyRef?: string;
+  companyJurisdiction?: string;
+  companyWebsite?: string;
+  buyerVerificationRequirement?: BuyerVerificationRequirement;
   sourceRecordId?: string;
+};
+
+type StatusLogEntry = {
+  id: number;
+  level: "info" | "error";
+  message: string;
+  timestamp: string;
+};
+
+type ResolvedAssetMetadataSnapshot = {
+  status: "loading" | "ready" | "error";
+  metadataHttpUrl: string;
+  imageHttpUrl: string;
+  imageHttpFallbackUrls?: string[];
+  inlineImageDataUrl?: string;
+  name: string;
+  description: string;
+  buyerVerificationRequirement?: BuyerVerificationRequirement;
+  companyLegalName?: string;
+  companyRef?: string;
+  companyWebsite?: string;
+  companyJurisdiction?: string;
+  error?: string;
 };
 
 const SESSION_SECRET_STORAGE_PREFIX = "passstore:session-secret:";
 const KYB_STUB_STORAGE_PREFIX = "passstore:kyb-stub:";
 const KYB_COMPANY_PROFILE_STORAGE_PREFIX = "passstore:kyb-company-profile:";
 const REGISTRY_QUEUE_STORAGE_PREFIX = "passstore:registry-queue:";
+const IPFS_HTTP_GATEWAYS = [
+  "https://ipfs.io/ipfs/",
+  "https://cloudflare-ipfs.com/ipfs/",
+  "https://gateway.pinata.cloud/ipfs/"
+] as const;
+const IPFS_GATEWAY_FETCH_TIMEOUT_MS = 4500;
 const NETWORK_OPTIONS: NetworkOption[] = [
   { chainId: 31337, label: "Localhost" },
   { chainId: 11155111, label: "Ethereum Sepolia" },
@@ -172,6 +221,207 @@ function isTokenStandard(value: unknown): value is TokenStandard {
   return value === "ERC20" || value === "ERC721" || value === "ERC1155";
 }
 
+function normalizeBuyerVerificationRequirement(value: unknown): BuyerVerificationRequirement | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  switch (normalized) {
+    case "open":
+    case "none":
+    case "public":
+      return "open";
+    case "kyc":
+      return "kyc";
+    case "wid":
+    case "worldid":
+    case "world_id":
+    case "world-id":
+      return "worldid";
+    case "kyc+wid":
+    case "kyc+worldid":
+    case "kyc_worldid":
+    case "kyc-worldid":
+    case "kyc,wid":
+    case "kyc,worldid":
+      return "kyc_worldid";
+    default:
+      return undefined;
+  }
+}
+
+function buyerVerificationRequirementLabel(value: BuyerVerificationRequirement): string {
+  switch (value) {
+    case "kyc":
+      return "KYC";
+    case "worldid":
+      return "World ID";
+    case "kyc_worldid":
+      return "KYC + World ID";
+    case "open":
+    default:
+      return "Open";
+  }
+}
+
+function buyerVerificationRequirementHelpText(value: BuyerVerificationRequirement): string {
+  switch (value) {
+    case "kyc":
+      return "KYC required to buy";
+    case "worldid":
+      return "World ID required to buy";
+    case "kyc_worldid":
+      return "KYC + World ID required to buy";
+    case "open":
+    default:
+      return "No verification required to buy";
+  }
+}
+
+function buyerVerificationRequirementSatisfied(
+  requirement: BuyerVerificationRequirement,
+  hasKyc: boolean,
+  hasWorldId: boolean
+): boolean {
+  switch (requirement) {
+    case "kyc":
+      return hasKyc;
+    case "worldid":
+      return hasWorldId;
+    case "kyc_worldid":
+      return hasKyc && hasWorldId;
+    case "open":
+    default:
+      return true;
+  }
+}
+
+function buyerVerificationRequirementBadgeClass(value: BuyerVerificationRequirement): "ok" | "neutral" | "warn" {
+  switch (value) {
+    case "open":
+      return "neutral";
+    case "kyc":
+    case "worldid":
+    case "kyc_worldid":
+    default:
+      return "warn";
+  }
+}
+
+function buyerVerificationRequirementFromMetadata(payload: Record<string, unknown>): BuyerVerificationRequirement | undefined {
+  const topLevelCandidates = [
+    payload.buyerVerificationRequirement,
+    payload.buyerVerification,
+    payload.accessRequirement,
+    payload.buyRequirement
+  ];
+
+  for (const candidate of topLevelCandidates) {
+    const parsed = normalizeBuyerVerificationRequirement(candidate);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  const rawProperties = payload.properties;
+  if (!rawProperties || typeof rawProperties !== "object" || Array.isArray(rawProperties)) {
+    return undefined;
+  }
+
+  const properties = rawProperties as Record<string, unknown>;
+  const propertyCandidates = [
+    properties.buyerVerificationRequirement,
+    properties.buyerVerification,
+    properties.accessRequirement,
+    properties.buyRequirement
+  ];
+  for (const candidate of propertyCandidates) {
+    const parsed = normalizeBuyerVerificationRequirement(candidate);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
+function metadataObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function metadataString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim();
+  return normalized || undefined;
+}
+
+function metadataCompanyFields(payload: Record<string, unknown>): Pick<
+  ResolvedAssetMetadataSnapshot,
+  "companyLegalName" | "companyRef" | "companyWebsite" | "companyJurisdiction"
+> {
+  const properties = metadataObject(payload.properties);
+  const nestedSources = [
+    metadataObject(payload.issuer),
+    metadataObject(payload.company),
+    properties ? metadataObject(properties.issuer) : null,
+    properties ? metadataObject(properties.company) : null
+  ].filter(Boolean) as Record<string, unknown>[];
+
+  const pickNested = (...keys: string[]): string | undefined => {
+    for (const source of nestedSources) {
+      for (const key of keys) {
+        const value = metadataString(source[key]);
+        if (value) {
+          return value;
+        }
+      }
+    }
+    return undefined;
+  };
+
+  const companyLegalName =
+    pickNested("legalName", "companyLegalName", "companyName", "name") ||
+    metadataString(payload.issuerLegalName) ||
+    metadataString(payload.companyLegalName) ||
+    metadataString(payload.issuerName) ||
+    metadataString(payload.publisherName) ||
+    (properties ? metadataString(properties.issuerLegalName) : undefined) ||
+    (properties ? metadataString(properties.companyLegalName) : undefined) ||
+    (properties ? metadataString(properties.issuerName) : undefined);
+
+  const companyRef =
+    pickNested("companyRef", "ref", "companyId") ||
+    metadataString(payload.companyRef) ||
+    metadataString(payload.issuerRef) ||
+    (properties ? metadataString(properties.companyRef) : undefined) ||
+    (properties ? metadataString(properties.issuerRef) : undefined);
+
+  const companyWebsite =
+    pickNested("website", "url", "link") ||
+    metadataString(payload.companyWebsite) ||
+    metadataString(payload.issuerWebsite) ||
+    (properties ? metadataString(properties.companyWebsite) : undefined) ||
+    (properties ? metadataString(properties.issuerWebsite) : undefined);
+
+  const companyJurisdiction =
+    pickNested("jurisdiction", "registrationCountry", "country") ||
+    metadataString(payload.companyJurisdiction) ||
+    (properties ? metadataString(properties.companyJurisdiction) : undefined);
+
+  return {
+    companyLegalName,
+    companyRef,
+    companyWebsite,
+    companyJurisdiction
+  };
+}
+
 function defaultNetworkChainId(preferredChainId: number): number {
   if (preferredChainId > 0) {
     return preferredChainId;
@@ -182,6 +432,29 @@ function defaultNetworkChainId(preferredChainId: number): number {
 function chainName(chainId: number): string {
   const network = NETWORK_OPTIONS.find((item) => item.chainId === chainId);
   return network ? network.label : `Chain ${chainId}`;
+}
+
+function contractExplorerUrl(chainId: number, address: string): string {
+  const normalized = address.trim();
+  if (!ethers.isAddress(normalized)) {
+    return "";
+  }
+
+  const checksummed = ethers.getAddress(normalized);
+  switch (chainId) {
+    case 11155111:
+      return `https://sepolia.etherscan.io/address/${checksummed}`;
+    case 84532:
+      return `https://sepolia.basescan.org/address/${checksummed}`;
+    case 421614:
+      return `https://sepolia.arbiscan.io/address/${checksummed}`;
+    case 80002:
+      return `https://amoy.polygonscan.com/address/${checksummed}`;
+    case 97:
+      return `https://testnet.bscscan.com/address/${checksummed}`;
+    default:
+      return "";
+  }
 }
 
 function tokenStandardToCode(value: TokenStandard): number {
@@ -579,6 +852,441 @@ function deploymentDraftFromPresetRow(
   };
 }
 
+function xmlEscape(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function compactSvg(svg: string): string {
+  return svg.replace(/>\s+</g, "><").replace(/\s{2,}/g, " ").trim();
+}
+
+function svgSnippet(value: string, maxChars: number): string {
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+function slugifyAssetName(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || "asset";
+}
+
+function buildGeneratedAssetPreviewSvg(
+  preset: GeneratedAssetPreset,
+  generatedAt: Date
+): string {
+  const title = xmlEscape(preset.name);
+  const subtitle = xmlEscape(generatedAt.toLocaleString());
+  const noteLine = xmlEscape(svgSnippet(preset.notes, 92));
+  const deploymentsCount = preset.deployments.length;
+  const tokenKinds = Array.from(new Set(preset.deployments.map((item) => item.tokenStandard))).join(" · ");
+  const seedSource = `${preset.name}|${generatedAt.toISOString()}`;
+  let seed = 0;
+  for (let index = 0; index < seedSource.length; index += 1) {
+    seed = (seed * 31 + seedSource.charCodeAt(index)) >>> 0;
+  }
+  const rand = (): number => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 0xffffffff;
+  };
+
+  const hueA = Math.floor(rand() * 360);
+  const hueB = (hueA + 54 + Math.floor(rand() * 66)) % 360;
+  const hueC = (hueB + 72 + Math.floor(rand() * 58)) % 360;
+  const circles = Array.from({ length: 6 }, (_, index) => {
+    const cx = Math.round(80 + rand() * 1040);
+    const cy = Math.round(70 + rand() * 490);
+    const r = Math.round(84 + rand() * 190);
+    const hue = [hueA, hueB, hueC][index % 3];
+    const alpha = (0.12 + rand() * 0.16).toFixed(2);
+    return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="hsl(${hue} 88% 58%)" opacity="${alpha}"/>`;
+  }).join("");
+  const ribbons = Array.from({ length: 4 }, (_, index) => {
+    const x = Math.round(-120 + rand() * 1230);
+    const y = Math.round(50 + rand() * 500);
+    const width = Math.round(360 + rand() * 470);
+    const height = Math.round(38 + rand() * 52);
+    const rotate = Math.round(-28 + rand() * 56);
+    const hue = [hueC, hueA, hueB][index % 3];
+    const alpha = (0.1 + rand() * 0.08).toFixed(2);
+    return `<rect x="${x}" y="${y}" width="${width}" height="${height}" rx="${Math.round(height / 2)}" fill="hsl(${hue} 94% 55%)" opacity="${alpha}" transform="rotate(${rotate} ${x + width / 2} ${y + height / 2})"/>`;
+  }).join("");
+  const arcs = Array.from({ length: 5 }, (_, index) => {
+    const x = Math.round(120 + rand() * 930);
+    const y = Math.round(90 + rand() * 370);
+    const rx = Math.round(60 + rand() * 150);
+    const ry = Math.round(30 + rand() * 90);
+    const sweep = index % 2 === 0 ? 1 : 0;
+    const strokeHue = [hueB, hueC, hueA][index % 3];
+    const opacity = (0.18 + rand() * 0.18).toFixed(2);
+    const x2 = x + Math.round((rand() * 2 - 1) * 180);
+    const y2 = y + Math.round((rand() * 2 - 1) * 120);
+    return `<path d="M ${x} ${y} A ${rx} ${ry} ${Math.round(rand() * 180)} 0 ${sweep} ${x2} ${y2}" stroke="hsl(${strokeHue} 92% 92%)" stroke-width="${(2 + rand() * 3).toFixed(1)}" opacity="${opacity}" fill="none" stroke-linecap="round"/>`;
+  }).join("");
+  const gridLines = Array.from({ length: 6 }, (_, index) => {
+    const x = 72 + index * 178;
+    return `<line x1="${x}" y1="64" x2="${x}" y2="566" stroke="#FFFFFF" stroke-opacity="0.08"/>`;
+  }).join("");
+  const gridRows = Array.from({ length: 4 }, (_, index) => {
+    const y = 92 + index * 118;
+    return `<line x1="66" y1="${y}" x2="1134" y2="${y}" stroke="#FFFFFF" stroke-opacity="0.07"/>`;
+  }).join("");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="24" x2="1184" y2="610" gradientUnits="userSpaceOnUse">
+      <stop stop-color="hsl(${hueA} 92% 54%)"/>
+      <stop offset="0.52" stop-color="hsl(${hueB} 90% 56%)"/>
+      <stop offset="1" stop-color="hsl(${hueC} 88% 52%)"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(210 150) rotate(24) scale(430 290)">
+      <stop stop-color="#FFFFFF" stop-opacity="0.58"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(995 502) rotate(-18) scale(470 310)">
+      <stop stop-color="#FFFFFF" stop-opacity="0.46"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" rx="24" fill="url(#bg)"/>
+  <rect width="1200" height="630" rx="24" fill="url(#glowA)"/>
+  <rect width="1200" height="630" rx="24" fill="url(#glowB)"/>
+  ${gridLines}
+  ${gridRows}
+  ${circles}
+  ${ribbons}
+  ${arcs}
+  <rect x="44" y="44" width="1112" height="542" rx="22" fill="#FFFFFF" opacity="0.08" stroke="#FFFFFF" stroke-opacity="0.22"/>
+  <rect x="78" y="78" width="280" height="38" rx="19" fill="#0F172A" fill-opacity="0.18" stroke="#FFFFFF" stroke-opacity="0.24"/>
+  <text x="102" y="103" fill="#FFFFFF" font-family="Arial, sans-serif" font-size="16" font-weight="700" letter-spacing="0.06em">VERIFIED ASSET MARKET</text>
+  <rect x="78" y="408" width="1044" height="154" rx="20" fill="#0B1220" fill-opacity="0.22" stroke="#FFFFFF" stroke-opacity="0.18"/>
+  <text x="102" y="454" fill="#F3F8FF" font-family="Arial, sans-serif" font-size="44" font-weight="700">${title}</text>
+  ${noteLine ? `<text x="102" y="488" fill="#E6EEFF" font-family="Arial, sans-serif" font-size="18">${noteLine}</text>` : ""}
+  <rect x="102" y="508" width="${Math.max(122, Math.min(260, 120 + deploymentsCount * 22))}" height="28" rx="14" fill="#FFFFFF" fill-opacity="0.12" stroke="#FFFFFF" stroke-opacity="0.18"/>
+  <text x="118" y="527" fill="#FFFFFF" font-family="Arial, sans-serif" font-size="14" font-weight="700">${deploymentsCount} network${deploymentsCount === 1 ? "" : "s"}</text>
+  <rect x="274" y="508" width="264" height="28" rx="14" fill="#FFFFFF" fill-opacity="0.10" stroke="#FFFFFF" stroke-opacity="0.14"/>
+  <text x="290" y="527" fill="#F8FBFF" font-family="Arial, sans-serif" font-size="14" font-weight="700">${xmlEscape(tokenKinds || "Token")}</text>
+  <text x="102" y="551" fill="#EAF2FF" font-family="Arial, sans-serif" font-size="15">Generated ${subtitle}</text>
+</svg>`;
+}
+
+function pinataAuthHeader(jwt: string): string {
+  const normalized = jwt.trim();
+  return normalized.toLowerCase().startsWith("bearer ") ? normalized : `Bearer ${normalized}`;
+}
+
+function parsePinataIpfsHash(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    throw new Error("Pinata response is not JSON");
+  }
+
+  const hash = String((payload as { IpfsHash?: unknown }).IpfsHash ?? "").trim();
+  if (!hash) {
+    throw new Error("Pinata response did not include IpfsHash");
+  }
+  return hash;
+}
+
+function parsePinataErrorMessage(raw: string, status: number): string {
+  const fallback = `Pinata request failed (${status})`;
+  const body = raw.trim();
+  if (!body) {
+    return fallback;
+  }
+
+  try {
+    const parsed = JSON.parse(body) as { error?: { reason?: string; details?: string } | string; message?: string };
+    if (typeof parsed.message === "string" && parsed.message.trim()) {
+      return parsed.message.trim();
+    }
+    if (typeof parsed.error === "string" && parsed.error.trim()) {
+      return parsed.error.trim();
+    }
+    if (parsed.error && typeof parsed.error === "object") {
+      const reason = typeof parsed.error.reason === "string" ? parsed.error.reason.trim() : "";
+      const details = typeof parsed.error.details === "string" ? parsed.error.details.trim() : "";
+      if (reason && details) {
+        return `${reason}: ${details}`;
+      }
+      if (reason) {
+        return reason;
+      }
+      if (details) {
+        return details;
+      }
+    }
+  } catch {
+    // Fall through to raw body snippet.
+  }
+
+  return `${fallback}: ${body.slice(0, 200)}`;
+}
+
+async function uploadFileToPinata(blob: Blob, fileName: string, jwt: string, pinName: string): Promise<string> {
+  const formData = new FormData();
+  formData.append("file", blob, fileName);
+  formData.append("pinataMetadata", JSON.stringify({ name: pinName }));
+
+  const response = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
+    method: "POST",
+    headers: {
+      Authorization: pinataAuthHeader(jwt)
+    },
+    body: formData
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(parsePinataErrorMessage(body, response.status));
+  }
+
+  const payload = (await response.json()) as unknown;
+  return parsePinataIpfsHash(payload);
+}
+
+async function uploadJsonToPinata(content: unknown, jwt: string, pinName: string): Promise<string> {
+  const response = await fetch("https://api.pinata.cloud/pinning/pinJSONToIPFS", {
+    method: "POST",
+    headers: {
+      Authorization: pinataAuthHeader(jwt),
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      pinataMetadata: { name: pinName },
+      pinataContent: content
+    })
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(parsePinataErrorMessage(body, response.status));
+  }
+
+  const payload = (await response.json()) as unknown;
+  return parsePinataIpfsHash(payload);
+}
+
+function contentUriToHttpUrls(uri: string): string[] {
+  const normalized = uri.trim();
+  if (!normalized) {
+    return [];
+  }
+
+  if (/^https?:\/\//i.test(normalized)) {
+    return [normalized];
+  }
+
+  if (normalized.toLowerCase().startsWith("ipfs://")) {
+    const rawPath = normalized.slice("ipfs://".length).replace(/^ipfs\//i, "");
+    if (!rawPath) {
+      return [];
+    }
+    return IPFS_HTTP_GATEWAYS.map((base) => `${base}${rawPath}`);
+  }
+
+  return [];
+}
+
+function contentUriToHttpUrl(uri: string): string {
+  const urls = contentUriToHttpUrls(uri);
+  return urls[0] ?? "";
+}
+
+async function fetchJsonWithGatewayFallback(uri: string): Promise<{ url: string; payload: Record<string, unknown> }> {
+  const candidates = contentUriToHttpUrls(uri);
+  if (candidates.length === 0) {
+    throw new Error("Unsupported metadata URI");
+  }
+
+  const failures: string[] = [];
+  for (const url of candidates) {
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timeoutId =
+      controller && typeof window !== "undefined"
+        ? window.setTimeout(() => controller.abort(), IPFS_GATEWAY_FETCH_TIMEOUT_MS)
+        : null;
+
+    try {
+      const response = await fetch(url, controller ? { signal: controller.signal } : undefined);
+      if (!response.ok) {
+        failures.push(`${new URL(url).host}: ${response.status}`);
+        continue;
+      }
+
+      const payload = (await response.json()) as unknown;
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+        failures.push(`${new URL(url).host}: invalid JSON payload`);
+        continue;
+      }
+
+      return { url, payload: payload as Record<string, unknown> };
+    } catch (err) {
+      const message = err instanceof DOMException && err.name === "AbortError"
+        ? `timeout (${IPFS_GATEWAY_FETCH_TIMEOUT_MS}ms)`
+        : (err as Error).message;
+      failures.push(`${new URL(url).host}: ${message}`);
+    } finally {
+      if (timeoutId !== null && typeof window !== "undefined") {
+        window.clearTimeout(timeoutId);
+      }
+    }
+  }
+
+  throw new Error(failures.length > 0 ? `Metadata fetch failed (${failures.join(" | ")})` : "Metadata fetch failed");
+}
+
+function preferredIpfsMediaHttpUrl(uri: string): string {
+  const candidates = contentUriToHttpUrls(uri);
+  if (candidates.length === 0) {
+    return "";
+  }
+
+  const preferred = candidates.find((item) => item.includes("ipfs.io")) ?? candidates[0];
+  return preferred;
+}
+
+function ipfsMediaFallbackUrls(uri: string): string[] {
+  return contentUriToHttpUrls(uri);
+}
+
+function metadataInlineImageDataUrl(payload: Record<string, unknown>): string {
+  const properties = metadataObject(payload.properties);
+  const candidates = [
+    payload.image_data,
+    payload.imageData,
+    properties?.image_data,
+    properties?.imageData
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") {
+      continue;
+    }
+
+    const trimmed = candidate.trim();
+    if (!trimmed) {
+      continue;
+    }
+    if (trimmed.startsWith("data:")) {
+      return trimmed;
+    }
+    if (trimmed.includes("<svg")) {
+      return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(trimmed)}`;
+    }
+  }
+
+  return "";
+}
+
+function handleVerifiedAssetImageError(event: SyntheticEvent<HTMLImageElement>): void {
+  const img = event.currentTarget;
+  const fallbackUrls = (img.dataset.fallbackUrls ?? "").split("\n").filter(Boolean);
+  if (fallbackUrls.length === 0) {
+    return;
+  }
+
+  const currentIndex = Number(img.dataset.fallbackIndex ?? "0");
+  const nextIndex = Number.isFinite(currentIndex) ? currentIndex + 1 : 1;
+  const nextUrl = fallbackUrls[nextIndex];
+  if (!nextUrl) {
+    img.onerror = null;
+    return;
+  }
+
+  img.dataset.fallbackIndex = String(nextIndex);
+  img.src = nextUrl;
+}
+
+function unsupportedMetadataSnapshot(): ResolvedAssetMetadataSnapshot {
+  return {
+    status: "error",
+    metadataHttpUrl: "",
+    imageHttpUrl: "",
+    name: "",
+    description: "",
+    error: "Unsupported metadata URI"
+  };
+}
+
+function imagePlaceholderSnapshot(metadataHttpUrl: string): ResolvedAssetMetadataSnapshot {
+  return {
+    status: "loading",
+    metadataHttpUrl,
+    imageHttpUrl: "",
+    inlineImageDataUrl: "",
+    name: "",
+    description: ""
+  };
+}
+
+function metadataErrorSnapshot(metadataHttpUrl: string, message: string): ResolvedAssetMetadataSnapshot {
+  return {
+    status: "error",
+    metadataHttpUrl,
+    imageHttpUrl: "",
+    inlineImageDataUrl: "",
+    name: "",
+    description: "",
+    error: message
+  };
+}
+
+function metadataReadySnapshot(metadataHttpUrl: string, payload: Record<string, unknown>): ResolvedAssetMetadataSnapshot {
+  const imageCandidate =
+    typeof payload.image === "string"
+      ? payload.image
+      : typeof payload.image_url === "string"
+        ? payload.image_url
+        : typeof payload.imageUrl === "string"
+          ? payload.imageUrl
+          : "";
+
+  const inlineImageDataUrl = metadataInlineImageDataUrl(payload);
+  return {
+    status: "ready",
+    metadataHttpUrl,
+    imageHttpUrl: preferredIpfsMediaHttpUrl(imageCandidate) || contentUriToHttpUrl(imageCandidate),
+    imageHttpFallbackUrls: ipfsMediaFallbackUrls(imageCandidate),
+    inlineImageDataUrl,
+    name: typeof payload.name === "string" ? payload.name.trim() : "",
+    description: typeof payload.description === "string" ? payload.description.trim() : "",
+    buyerVerificationRequirement: buyerVerificationRequirementFromMetadata(payload),
+    ...metadataCompanyFields(payload)
+  };
+}
+
+function externalHttpUrl(url: string): string {
+  const normalized = url.trim();
+  if (!normalized) {
+    return "";
+  }
+
+  if (/^https?:\/\//i.test(normalized)) {
+    return normalized;
+  }
+
+  if (/^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(normalized)) {
+    return `https://${normalized}`;
+  }
+
+  return "";
+}
+
 function readRegistryQueue(address: string): RegistryRecord[] {
   if (typeof window === "undefined" || !address) {
     return [];
@@ -698,6 +1406,8 @@ function readRegistryQueue(address: string): RegistryRecord[] {
         companyLegalName: typeof item.companyLegalName === "string" ? item.companyLegalName : undefined,
         companyRef: typeof item.companyRef === "string" ? item.companyRef : undefined,
         companyJurisdiction: typeof item.companyJurisdiction === "string" ? item.companyJurisdiction : undefined,
+        companyWebsite: typeof item.companyWebsite === "string" ? item.companyWebsite : undefined,
+        buyerVerificationRequirement: normalizeBuyerVerificationRequirement(item.buyerVerificationRequirement),
         kybVerifiedAt: typeof item.kybVerifiedAt === "number" ? item.kybVerifiedAt : undefined,
         kybRequestId: typeof item.kybRequestId === "string" ? item.kybRequestId : undefined,
         status,
@@ -729,6 +1439,7 @@ function defaultAssetDraft(chainId: number): AssetDraft {
     metadataUri: "",
     metadataHash: "",
     notes: "",
+    buyerVerificationRequirement: "kyc",
     deployments: [createDeploymentDraft(chainId)]
   };
 }
@@ -768,6 +1479,7 @@ export default function App() {
   const [refreshingStatus, setRefreshingStatus] = useState<boolean>(false);
   const [syncWaiting, setSyncWaiting] = useState<boolean>(false);
   const [status, setStatus] = useState<string>("Idle");
+  const [statusHistory, setStatusHistory] = useState<StatusLogEntry[]>([]);
   const [error, setError] = useState<string>("");
   const [requestId, setRequestId] = useState<string>("-");
   const [sdkTokenPreview, setSdkTokenPreview] = useState<string>("-");
@@ -775,6 +1487,11 @@ export default function App() {
   const [sdkPacketExpiresAt, setSdkPacketExpiresAt] = useState<number>(0);
   const [verify, setVerify] = useState<VerifySnapshot>({ ok: false, reason: 1 });
   const [attestation, setAttestation] = useState<AttestationSnapshot | null>(null);
+  const [verificationExpirations, setVerificationExpirations] = useState<VerificationExpirationsSnapshot>({
+    humanExpiration: 0,
+    worldIdExpiration: 0,
+    kybExpiration: 0
+  });
   const [encryptionReady, setEncryptionReady] = useState<boolean>(false);
   const [creIssuerAllowed, setCreIssuerAllowed] = useState<boolean | null>(null);
   const [pendingDecrypt, setPendingDecrypt] = useState<PendingDecryptPacket | null>(null);
@@ -788,10 +1505,15 @@ export default function App() {
   const [hasKybRequest, setHasKybRequest] = useState<boolean>(false);
   const [latestKybRequestId, setLatestKybRequestId] = useState<string>("-");
   const [generatedPresetCursor, setGeneratedPresetCursor] = useState<number>(0);
+  const [createRealIpfsData, setCreateRealIpfsData] = useState<boolean>(false);
+  const [generatingAsset, setGeneratingAsset] = useState<boolean>(false);
   const [assetDraft, setAssetDraft] = useState<AssetDraft>(defaultAssetDraft(env.chainId));
   const [registryQueue, setRegistryQueue] = useState<RegistryRecord[]>([]);
   const [verifiedAssets, setVerifiedAssets] = useState<VerifiedAssetCard[]>([]);
+  const [resolvedAssetMetadataByUri, setResolvedAssetMetadataByUri] = useState<Record<string, ResolvedAssetMetadataSnapshot>>({});
   const [refreshingAssets, setRefreshingAssets] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<AppTab>("assets");
+  const [assetsViewMode, setAssetsViewMode] = useState<AssetsViewMode>("all");
 
   const { open } = useAppKit();
   const { address: appKitAddress, isConnected: isAppKitConnected } = useAppKitAccount({ namespace: "eip155" });
@@ -799,9 +1521,12 @@ export default function App() {
 
   const sessionSecretKeyRef = useRef<string>("");
   const worldIdPollNonceRef = useRef<number>(0);
+  const kybPollNonceRef = useRef<number>(0);
   const worldIdPendingAddressRef = useRef<string>("");
   const sumsubAutoSyncInFlightRef = useRef<boolean>(false);
   const sumsubAutoSyncCooldownUntilRef = useRef<number>(0);
+  const statusLogRef = useRef<HTMLDivElement | null>(null);
+  const statusLogCounterRef = useRef<number>(0);
 
   const provider = useMemo(() => {
     if (!walletProvider) {
@@ -810,9 +1535,72 @@ export default function App() {
     return new BrowserProvider(walletProvider as ethers.Eip1193Provider);
   }, [walletProvider]);
 
+  const publicReadProvider = useMemo(() => {
+    if (!env.rpcUrl) {
+      return null;
+    }
+    return new JsonRpcProvider(env.rpcUrl);
+  }, []);
+
   useEffect(() => {
     sessionSecretKeyRef.current = sessionSecretKeyHex;
   }, [sessionSecretKeyHex]);
+
+  useEffect(() => {
+    const timestamp = new Date().toLocaleTimeString();
+    setStatusHistory((previous) => {
+      const lastEntry = previous[previous.length - 1];
+      if (lastEntry && lastEntry.level === "info" && lastEntry.message === status) {
+        return previous;
+      }
+      statusLogCounterRef.current += 1;
+      const entry: StatusLogEntry = {
+        id: statusLogCounterRef.current,
+        level: "info",
+        message: status,
+        timestamp
+      };
+      const next = [
+        ...previous,
+        entry
+      ];
+      return next.slice(-250);
+    });
+  }, [status]);
+
+  useEffect(() => {
+    if (!error) {
+      return;
+    }
+
+    const timestamp = new Date().toLocaleTimeString();
+    setStatusHistory((previous) => {
+      const lastEntry = previous[previous.length - 1];
+      if (lastEntry && lastEntry.level === "error" && lastEntry.message === error) {
+        return previous;
+      }
+      statusLogCounterRef.current += 1;
+      const entry: StatusLogEntry = {
+        id: statusLogCounterRef.current,
+        level: "error",
+        message: error,
+        timestamp
+      };
+      const next = [
+        ...previous,
+        entry
+      ];
+      return next.slice(-250);
+    });
+  }, [error]);
+
+  useEffect(() => {
+    const el = statusLogRef.current;
+    if (!el) {
+      return;
+    }
+    el.scrollTop = el.scrollHeight;
+  }, [statusHistory]);
 
   useEffect(() => {
     const lightClass = "page-theme-light";
@@ -824,9 +1612,62 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    const metadataUris = Array.from(new Set(verifiedAssets.map((asset) => asset.metadataUri.trim()).filter(Boolean)));
+
+    for (const metadataUri of metadataUris) {
+      if (resolvedAssetMetadataByUri[metadataUri]) {
+        continue;
+      }
+
+      const metadataHttpUrl = contentUriToHttpUrl(metadataUri);
+      if (!metadataHttpUrl) {
+        setResolvedAssetMetadataByUri((previous) => ({
+          ...previous,
+          [metadataUri]: unsupportedMetadataSnapshot()
+        }));
+        continue;
+      }
+
+      setResolvedAssetMetadataByUri((previous) => {
+        if (previous[metadataUri]) {
+          return previous;
+        }
+        return {
+          ...previous,
+          [metadataUri]: imagePlaceholderSnapshot(metadataHttpUrl)
+        };
+      });
+
+      void (async () => {
+        try {
+          const { url: resolvedMetadataHttpUrl, payload } = await fetchJsonWithGatewayFallback(metadataUri);
+          const next = metadataReadySnapshot(resolvedMetadataHttpUrl, payload);
+
+          if (!cancelled) {
+            setResolvedAssetMetadataByUri((previous) => ({ ...previous, [metadataUri]: next }));
+          }
+        } catch (err) {
+          if (!cancelled) {
+            setResolvedAssetMetadataByUri((previous) => ({
+              ...previous,
+              [metadataUri]: metadataErrorSnapshot(metadataHttpUrl, (err as Error).message)
+            }));
+          }
+        }
+      })();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [verifiedAssets]);
+
+  useEffect(() => {
     if (!appKitAddress || !isAppKitConnected) {
       if (account) {
         worldIdPollNonceRef.current += 1;
+        kybPollNonceRef.current += 1;
         worldIdPendingAddressRef.current = "";
         setAccount("");
         setChainId(0);
@@ -839,6 +1680,7 @@ export default function App() {
         setSdkTokenPreview("-");
         setSdkPacketStage("idle");
         setSdkPacketExpiresAt(0);
+        setVerificationExpirations({ humanExpiration: 0, worldIdExpiration: 0, kybExpiration: 0 });
         setWorldIdVerified(false);
         setKybStubStatus("not_started");
         setKybCompanyProfile(null);
@@ -853,6 +1695,7 @@ export default function App() {
 
     if (!account || account.toLowerCase() !== appKitAddress.toLowerCase()) {
       worldIdPollNonceRef.current += 1;
+      kybPollNonceRef.current += 1;
       worldIdPendingAddressRef.current = "";
       const restoredSessionSecret = readSessionSecret(appKitAddress);
       setAccount(appKitAddress);
@@ -865,6 +1708,7 @@ export default function App() {
       setSdkTokenPreview("-");
       setSdkPacketStage("idle");
       setSdkPacketExpiresAt(0);
+      setVerificationExpirations({ humanExpiration: 0, worldIdExpiration: 0, kybExpiration: 0 });
       setWorldIdVerified(false);
       setHasKybRequest(false);
       setLatestKybRequestId("-");
@@ -885,6 +1729,7 @@ export default function App() {
       setSdkTokenPreview("-");
       setSdkPacketStage("idle");
       setSdkPacketExpiresAt(0);
+      setVerificationExpirations({ humanExpiration: 0, worldIdExpiration: 0, kybExpiration: 0 });
       return;
     }
 
@@ -916,7 +1761,7 @@ export default function App() {
   }, [account, registryQueue]);
 
   useEffect(() => {
-    if (!account || !provider) {
+    if (activeTab === "assets" || !account || !provider) {
       return;
     }
 
@@ -928,7 +1773,34 @@ export default function App() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [account, provider]);
+  }, [account, provider, activeTab]);
+
+  useEffect(() => {
+    if (assetsViewMode === "mine" && !account) {
+      setAssetsViewMode("all");
+    }
+  }, [assetsViewMode, account]);
+
+  useEffect(() => {
+    if (activeTab !== "assets") {
+      return;
+    }
+
+    const assetsProvider = publicReadProvider ?? provider;
+    if (!assetsProvider) {
+      return;
+    }
+
+    const wantsMine = assetsViewMode === "mine" && Boolean(account);
+    void refreshVerifiedAssets(wantsMine ? account : undefined, assetsProvider, wantsMine ? "owner" : "public");
+    const intervalId = window.setInterval(() => {
+      void refreshVerifiedAssets(wantsMine ? account : undefined, assetsProvider, wantsMine ? "owner" : "public");
+    }, 12000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [activeTab, publicReadProvider, provider, assetsViewMode, account]);
 
   useEffect(() => {
     if (!account || !attestation) {
@@ -1027,6 +1899,41 @@ export default function App() {
 
     if (pollNonce === worldIdPollNonceRef.current) {
       setStatus("World ID proof accepted. CRE attestation is still pending. Press Check status.");
+    }
+  }
+
+  async function waitForKybAttestation(userAddress: string): Promise<void> {
+    if (!userAddress) {
+      return;
+    }
+
+    const pollNonce = kybPollNonceRef.current + 1;
+    kybPollNonceRef.current = pollNonce;
+    const maxAttempts = 18;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (pollNonce !== kybPollNonceRef.current) {
+        return;
+      }
+
+      const snapshot = await refreshOnchainData(userAddress);
+      if (pollNonce !== kybPollNonceRef.current) {
+        return;
+      }
+
+      if (snapshot?.hasActiveKybFlag) {
+        setStatus("KYB linked onchain.");
+        return;
+      }
+
+      if (attempt < maxAttempts) {
+        setStatus(`Waiting for CRE KYB attestation... ${attempt}/${maxAttempts}`);
+        await sleep(2500);
+      }
+    }
+
+    if (pollNonce === kybPollNonceRef.current) {
+      setStatus("KYB stub is marked complete, but CRE onchain attestation is still pending. Press Check status.");
     }
   }
 
@@ -1234,6 +2141,7 @@ export default function App() {
     const [
       verifyResult,
       attResult,
+      verificationExpResult,
       pubKeyHex,
       hasKybRequestOnchain,
       latestKybRequestIdOnchain,
@@ -1242,6 +2150,7 @@ export default function App() {
     ] = await Promise.all([
       registry.verifyUser(user, env.policyId),
       registry.attestations(user),
+      registry.verificationExpirations(user),
       broker.encryptionPubKey(user),
       broker.hasKybRequest(user),
       broker.latestKybRequestId(user),
@@ -1251,7 +2160,22 @@ export default function App() {
 
     const verifySnapshot = { ok: Boolean(verifyResult[0]), reason: Number(verifyResult[1]) };
     const attFlags = BigInt(attResult[0]);
-    const isWorldIdLinked = (attFlags & env.worldIdFlag) === env.worldIdFlag && Boolean(attResult[7]) && !Boolean(attResult[6]);
+    const verificationExpSnapshot: VerificationExpirationsSnapshot = {
+      humanExpiration: Number(verificationExpResult[0]),
+      worldIdExpiration: Number(verificationExpResult[1]),
+      kybExpiration: Number(verificationExpResult[2])
+    };
+    const nowTs = Math.floor(Date.now() / 1000);
+    const isWorldIdLinked =
+      (attFlags & env.worldIdFlag) === env.worldIdFlag &&
+      Boolean(attResult[7]) &&
+      !Boolean(attResult[6]) &&
+      (verificationExpSnapshot.worldIdExpiration === 0 || verificationExpSnapshot.worldIdExpiration >= nowTs);
+    const isKybLinked =
+      (attFlags & 4n) === 4n &&
+      Boolean(attResult[7]) &&
+      !Boolean(attResult[6]) &&
+      (verificationExpSnapshot.kybExpiration === 0 || verificationExpSnapshot.kybExpiration >= nowTs);
 
     setVerify(verifySnapshot);
     setAttestation({
@@ -1262,6 +2186,7 @@ export default function App() {
       revoked: Boolean(attResult[6]),
       exists: Boolean(attResult[7])
     });
+    setVerificationExpirations(verificationExpSnapshot);
     setWorldIdVerified(isWorldIdLinked);
     setHasKybRequest(Boolean(hasKybRequestOnchain));
     setLatestKybRequestId(Boolean(hasKybRequestOnchain) ? (latestKybRequestIdOnchain as bigint).toString() : "-");
@@ -1317,19 +2242,25 @@ export default function App() {
     return {
       verify: verifySnapshot,
       worldIdVerified: isWorldIdLinked,
+      hasActiveKybFlag: isKybLinked,
       hasKybRequest: Boolean(hasKybRequestOnchain),
       latestKybRequestId: Boolean(hasKybRequestOnchain) ? (latestKybRequestIdOnchain as bigint).toString() : "-"
     };
   }
 
-  async function refreshVerifiedAssets(forAccount?: string, providerOverride?: BrowserProvider): Promise<void> {
-    const activeProvider = providerOverride ?? provider;
+  async function refreshVerifiedAssets(
+    forAccount?: string,
+    providerOverride?: AssetReadProvider,
+    scope: "owner" | "public" = "owner"
+  ): Promise<void> {
+    const activeProvider = providerOverride ?? provider ?? publicReadProvider;
     if (!activeProvider) {
       return;
     }
 
-    const user = (forAccount ?? account).toLowerCase();
-    if (!user) {
+    const requestedUser = (forAccount ?? account).trim().toLowerCase();
+    const isPublicScope = scope === "public";
+    if (!isPublicScope && !requestedUser) {
       setVerifiedAssets([]);
       return;
     }
@@ -1343,20 +2274,49 @@ export default function App() {
     setRefreshingAssets(true);
 
     try {
-      const ownerKeys = (await assetRegistry.getOwnerAssetKeys(user)) as string[];
       const latestBlock = await activeProvider.getBlockNumber();
       const verifyMetaByKey = new Map<string, { txHash?: string; blockNumber?: number }>();
+      const ownerByKey = new Map<string, string>();
+      let assetKeys: string[] = [];
 
-      for (const key of ownerKeys) {
-        const filter = assetRegistry.filters.AssetVerified(key, user);
-        const logs = await assetRegistry.queryFilter(filter, 0, latestBlock);
-        const latestLog = logs.length > 0 ? logs[logs.length - 1] : undefined;
+      if (isPublicScope) {
+        const logs = await assetRegistry.queryFilter(assetRegistry.filters.AssetVerified(), 0, latestBlock);
+        const uniqueAssetKeys = new Set<string>();
 
-        if (latestLog) {
-          verifyMetaByKey.set(key.toLowerCase(), {
-            txHash: latestLog.transactionHash,
-            blockNumber: latestLog.blockNumber
+        for (const log of logs) {
+          const rawAssetKey = String((log as { args?: { assetKey?: unknown } }).args?.assetKey ?? "");
+          if (!rawAssetKey) {
+            continue;
+          }
+          const keyLower = rawAssetKey.toLowerCase();
+          uniqueAssetKeys.add(rawAssetKey);
+
+          const eventOwner = String((log as { args?: { owner?: unknown } }).args?.owner ?? "").toLowerCase();
+          if (eventOwner) {
+            ownerByKey.set(keyLower, eventOwner);
+          }
+
+          // queryFilter is chronological; later log overwrites earlier verification metadata for the same key.
+          verifyMetaByKey.set(keyLower, {
+            txHash: log.transactionHash,
+            blockNumber: log.blockNumber
           });
+        }
+
+        assetKeys = Array.from(uniqueAssetKeys);
+      } else {
+        assetKeys = (await assetRegistry.getOwnerAssetKeys(requestedUser)) as string[];
+        for (const key of assetKeys) {
+          const filter = assetRegistry.filters.AssetVerified(key, requestedUser);
+          const logs = await assetRegistry.queryFilter(filter, 0, latestBlock);
+          const latestLog = logs.length > 0 ? logs[logs.length - 1] : undefined;
+          if (latestLog) {
+            verifyMetaByKey.set(key.toLowerCase(), {
+              txHash: latestLog.transactionHash,
+              blockNumber: latestLog.blockNumber
+            });
+          }
+          ownerByKey.set(key.toLowerCase(), requestedUser);
         }
       }
 
@@ -1365,11 +2325,16 @@ export default function App() {
         name: string;
         metadataUri: string;
         metadataHash: string;
+        companyLegalName?: string;
+        companyRef?: string;
+        companyJurisdiction?: string;
+        companyWebsite?: string;
+        buyerVerificationRequirement?: BuyerVerificationRequirement;
         sourceRecordId?: string;
       };
 
       const verifiedRows: VerifiedDeploymentRow[] = [];
-      for (const key of ownerKeys) {
+      for (const key of assetKeys) {
         const record = await assetRegistry.assets(key);
         const exists = Boolean(record[12]);
         const revoked = Boolean(record[11]);
@@ -1388,6 +2353,7 @@ export default function App() {
         const verifiedAtValue = Number(record[9]);
         const updatedAtValue = Number(record[10]);
         const verifyMeta = verifyMetaByKey.get(key.toLowerCase());
+        const ownerValue = String(record[0] ?? "").toLowerCase() || ownerByKey.get(key.toLowerCase()) || requestedUser;
 
         const linkedQueueRecord = registryQueue.find((item) =>
           item.deployments.some(
@@ -1401,7 +2367,7 @@ export default function App() {
 
         verifiedRows.push({
           assetKey: key,
-          owner: user,
+          owner: ownerValue,
           chainId: chainIdValue,
           tokenAddress: tokenAddressValue,
           tokenStandard: tokenStandardValue,
@@ -1409,6 +2375,11 @@ export default function App() {
           name: linkedQueueRecord?.name || symbolOrNameValue,
           metadataUri: linkedQueueRecord?.metadataUri || metadataUriValue,
           metadataHash: linkedQueueRecord?.metadataHash || metadataHashValue,
+          companyLegalName: linkedQueueRecord?.companyLegalName,
+          companyRef: linkedQueueRecord?.companyRef,
+          companyJurisdiction: linkedQueueRecord?.companyJurisdiction,
+          companyWebsite: linkedQueueRecord?.companyWebsite,
+          buyerVerificationRequirement: linkedQueueRecord?.buyerVerificationRequirement,
           kybRequestId: kybRequestIdValue,
           verifiedAt: verifiedAtValue,
           updatedAt: updatedAtValue,
@@ -1447,6 +2418,11 @@ export default function App() {
                 verifyBlockNumber: row.verifyBlockNumber
               }
             ],
+            companyLegalName: row.companyLegalName,
+            companyRef: row.companyRef,
+            companyJurisdiction: row.companyJurisdiction,
+            companyWebsite: row.companyWebsite,
+            buyerVerificationRequirement: row.buyerVerificationRequirement,
             sourceRecordId: row.sourceRecordId
           });
           continue;
@@ -1466,6 +2442,21 @@ export default function App() {
           verifyTxHash: row.verifyTxHash,
           verifyBlockNumber: row.verifyBlockNumber
         });
+        if (!existing.companyLegalName && row.companyLegalName) {
+          existing.companyLegalName = row.companyLegalName;
+        }
+        if (!existing.companyRef && row.companyRef) {
+          existing.companyRef = row.companyRef;
+        }
+        if (!existing.companyJurisdiction && row.companyJurisdiction) {
+          existing.companyJurisdiction = row.companyJurisdiction;
+        }
+        if (!existing.companyWebsite && row.companyWebsite) {
+          existing.companyWebsite = row.companyWebsite;
+        }
+        if (!existing.buyerVerificationRequirement && row.buyerVerificationRequirement) {
+          existing.buyerVerificationRequirement = row.buyerVerificationRequirement;
+        }
       }
 
       const groupedCards = Array.from(groupedByAsset.values());
@@ -1486,8 +2477,9 @@ export default function App() {
 
       setVerifiedAssets(groupedCards);
 
-      setRegistryQueue((previous) =>
-        previous.map((item) => {
+      if (!isPublicScope) {
+        setRegistryQueue((previous) =>
+          previous.map((item) => {
           const updatedDeployments = item.deployments.map((deployment) => {
             const matchedRow = verifiedRows.find(
               (row) =>
@@ -1523,8 +2515,9 @@ export default function App() {
             deployments: updatedDeployments,
             status: nextStatus
           };
-        })
-      );
+          })
+        );
+      }
     } catch (err) {
       console.error("Failed to refresh verified assets", err);
     } finally {
@@ -1572,24 +2565,71 @@ export default function App() {
     }
   }
 
-  async function pollEncryptedPacket(reqId: bigint): Promise<{ ciphertextHex: string; expiresAt: number }> {
-    if (!provider) {
+  async function pollEncryptedPacket(
+    reqId: bigint,
+    ownerAddress: string
+  ): Promise<{ requestId: bigint; ciphertextHex: string; expiresAt: number }> {
+    const runners = [publicReadProvider, provider].filter(
+      (runner, index, all): runner is BrowserProvider | JsonRpcProvider =>
+        Boolean(runner) && all.findIndex((item) => item === runner) === index
+    );
+    if (runners.length === 0) {
       throw new Error("Provider unavailable");
     }
 
-    const { broker } = makeContracts(provider);
     const started = Date.now();
+    let activeRequestId = reqId;
+    let latestRequestRefreshAt = 0;
+
+    const readPacket = async (
+      requestId: bigint
+    ): Promise<{ ciphertextHex: string; expiresAt: number; exists: boolean }> => {
+      for (const runner of runners) {
+        try {
+          const { broker } = makeContracts(runner);
+          const packet = await broker.getPacket(requestId);
+          return {
+            ciphertextHex: packet[1] as string,
+            expiresAt: Number(packet[2]),
+            exists: Boolean(packet[4])
+          };
+        } catch {
+          // Try next runner (wallet provider vs public RPC).
+        }
+      }
+      throw new Error("Failed to read KYC packet from chain");
+    };
 
     while (Date.now() - started < 180_000) {
-      const packet = await broker.getPacket(reqId);
-      const ciphertextHex = packet[1] as string;
-      const expiresAt = Number(packet[2]);
+      const packet = await readPacket(activeRequestId);
+      const ciphertextHex = packet.ciphertextHex;
+      const expiresAt = packet.expiresAt;
 
       if (ciphertextHex !== "0x") {
-        return { ciphertextHex, expiresAt };
+        return { requestId: activeRequestId, ciphertextHex, expiresAt };
       }
 
-      setStatus(`Waiting encrypted SDK token for request ${reqId.toString()}...`);
+      // Defensive recovery: re-check latest request id onchain in case UI parsed an old/missed request id.
+      if (Date.now() - latestRequestRefreshAt >= 2500) {
+        latestRequestRefreshAt = Date.now();
+        for (const runner of runners) {
+          try {
+            const { broker } = makeContracts(runner);
+            const latestOnchainReqId = (await broker.latestKycRequestId(ownerAddress)) as bigint;
+            if (latestOnchainReqId !== activeRequestId) {
+              const latestPacket = await readPacket(latestOnchainReqId);
+              if (latestPacket.exists) {
+                activeRequestId = latestOnchainReqId;
+                break;
+              }
+            }
+          } catch {
+            // Ignore runner-specific read issues and keep polling.
+          }
+        }
+      }
+
+      setStatus(`Waiting encrypted SDK token for request ${activeRequestId.toString()}...`);
       await sleep(1000);
     }
 
@@ -1740,13 +2780,17 @@ export default function App() {
 
     void (async () => {
       try {
-        const packet = await pollEncryptedPacket(newRequestId);
+        const packet = await pollEncryptedPacket(newRequestId, address);
         const pendingPacket = {
-          requestId: newRequestId.toString(),
+          requestId: packet.requestId.toString(),
           ciphertextHex: packet.ciphertextHex,
           expiresAt: packet.expiresAt,
           owner: address
         };
+
+        if (packet.requestId !== newRequestId) {
+          setRequestId(packet.requestId.toString());
+        }
 
         setSdkPacketStage("token_ready");
         setSdkPacketExpiresAt(packet.expiresAt);
@@ -1964,6 +3008,7 @@ export default function App() {
           : "KYB stub request submitted. Waiting CRE attestation..."
       );
       await refreshOnchainData(address);
+      void waitForKybAttestation(address);
     } catch (err) {
       setKybStubStatus("not_started");
       setError((err as Error).message);
@@ -1990,6 +3035,7 @@ export default function App() {
     setKybStubStatus("verified");
     setKybCompanyProfile(profile);
     setStatus(`KYB stub marked as verified for ${profile.legalName}. If onchain flag is still missing, click Check status.`);
+    void waitForKybAttestation(account);
   }
 
   function resetKybStub() {
@@ -2008,7 +3054,7 @@ export default function App() {
     setAssetDraft((previous) => ({ ...previous, [field]: value }));
   }
 
-  function generateAssetDraftFromPreset() {
+  async function generateAssetDraftFromPreset() {
     if (GENERATED_ASSET_PRESETS.length === 0) {
       setError("No asset presets configured");
       return;
@@ -2016,18 +3062,109 @@ export default function App() {
 
     const presetIndex = generatedPresetCursor % GENERATED_ASSET_PRESETS.length;
     const preset = GENERATED_ASSET_PRESETS[presetIndex];
-    const metadataHash = ethers.keccak256(ethers.toUtf8Bytes(`${preset.name}|${preset.metadataUri}`));
 
+    if (!createRealIpfsData) {
+      const metadataHash = ethers.keccak256(ethers.toUtf8Bytes(`${preset.name}|${preset.metadataUri}`));
+
+      setError("");
+      setAssetDraft({
+        name: preset.name,
+        metadataUri: preset.metadataUri,
+        metadataHash,
+        notes: preset.notes,
+        buyerVerificationRequirement: assetDraft.buyerVerificationRequirement,
+        deployments: preset.deployments.map((deployment) => deploymentDraftFromPresetRow(deployment))
+      });
+      setGeneratedPresetCursor((previous) => (previous + 1) % GENERATED_ASSET_PRESETS.length);
+      setStatus(`Generated asset preset: ${preset.name}`);
+      return;
+    }
+
+    if (!env.pinataJwt) {
+      setError("Missing VITE_PINATA_JWT in frontend/.env for real IPFS generation");
+      return;
+    }
+
+    setBusy(true);
     setError("");
-    setAssetDraft({
-      name: preset.name,
-      metadataUri: preset.metadataUri,
-      metadataHash,
-      notes: preset.notes,
-      deployments: preset.deployments.map((deployment) => deploymentDraftFromPresetRow(deployment))
-    });
-    setGeneratedPresetCursor((previous) => (previous + 1) % GENERATED_ASSET_PRESETS.length);
-    setStatus(`Generated asset preset: ${preset.name}`);
+
+    try {
+      const generatedAt = new Date();
+      const slug = slugifyAssetName(preset.name);
+      const imageFileName = `${slug}-${generatedAt.getTime()}.svg`;
+      const issuerMetadata = (() => {
+        if (!kybCompanyProfile) {
+          return undefined;
+        }
+        const name = kybCompanyProfile.legalName?.trim();
+        const companyRef = kybCompanyProfile.companyRef?.trim();
+        const website = kybCompanyProfile.website?.trim();
+        const jurisdiction = kybCompanyProfile.jurisdiction?.trim();
+        const registrationCountry = kybCompanyProfile.registrationCountry?.trim();
+        if (!name && !companyRef && !website && !jurisdiction && !registrationCountry) {
+          return undefined;
+        }
+        return {
+          name: name || undefined,
+          legalName: name || undefined,
+          companyRef: companyRef || undefined,
+          website: website || undefined,
+          jurisdiction: jurisdiction || undefined,
+          registrationCountry: registrationCountry || undefined
+        };
+      })();
+
+      setStatus("Generating asset preview image...");
+      const imageSvg = compactSvg(buildGeneratedAssetPreviewSvg(preset, generatedAt));
+      const imageBlob = new Blob([imageSvg], { type: "image/svg+xml" });
+
+      setStatus("Uploading generated image to Pinata...");
+      const imageCid = await uploadFileToPinata(imageBlob, imageFileName, env.pinataJwt, `${preset.name} image`);
+      const imageUri = `ipfs://${imageCid}`;
+
+      const metadataPayload = {
+        name: preset.name,
+        description: preset.notes,
+        image: imageUri,
+        image_data: imageSvg,
+        attributes: [],
+        buyerVerificationRequirement: assetDraft.buyerVerificationRequirement,
+        issuer: issuerMetadata,
+        properties: {
+          generatedAt: generatedAt.toISOString(),
+          source: "passstore-frontend-pinata-generator",
+          metadataScope: "shared_asset",
+          imageDataFormat: "svg",
+          buyerVerificationRequirement: assetDraft.buyerVerificationRequirement,
+          buyerVerificationLabel: buyerVerificationRequirementLabel(assetDraft.buyerVerificationRequirement),
+          issuer: issuerMetadata
+        }
+      };
+
+      setStatus("Uploading metadata to Pinata...");
+      const metadataCid = await uploadJsonToPinata(metadataPayload, env.pinataJwt, `${preset.name} metadata`);
+      const metadataUri = `ipfs://${metadataCid}`;
+      const metadataHash = ethers.keccak256(ethers.toUtf8Bytes(`${preset.name}|${metadataUri}`));
+      const notesWithIpfs = `${preset.notes}\nGenerated preview image: ${imageUri}`;
+
+      setAssetDraft({
+        name: preset.name,
+        metadataUri,
+        metadataHash,
+        notes: notesWithIpfs,
+        buyerVerificationRequirement: assetDraft.buyerVerificationRequirement,
+        deployments: preset.deployments.map((deployment) => deploymentDraftFromPresetRow(deployment))
+      });
+      setGeneratedPresetCursor((previous) => (previous + 1) % GENERATED_ASSET_PRESETS.length);
+      setStatus(`Generated real IPFS asset via Pinata: ${preset.name}`);
+    } catch (err) {
+      const message = (err as Error).message || "Unknown Pinata error";
+      setStatus(`Real IPFS generation failed: ${message}`);
+      setError(message);
+    } finally {
+      setGeneratingAsset(false);
+      setBusy(false);
+    }
   }
 
   function updateDeploymentDraft<K extends keyof AssetDeploymentDraft>(
@@ -2085,7 +3222,7 @@ export default function App() {
       return;
     }
 
-    if (!hasKybFlag) {
+    if (!hasActiveKybFlag) {
       setError("KYB must be verified before asset registration");
       return;
     }
@@ -2153,17 +3290,22 @@ export default function App() {
       metadataUri: assetDraft.metadataUri.trim(),
       metadataHash: assetDraft.metadataHash.trim(),
       notes: assetDraft.notes.trim(),
+      buyerVerificationRequirement: assetDraft.buyerVerificationRequirement,
       deployments: normalizedDeployments,
       companyLegalName: kybCompanyProfile.legalName,
       companyRef: kybCompanyProfile.companyRef,
       companyJurisdiction: kybCompanyProfile.jurisdiction,
+      companyWebsite: kybCompanyProfile.website,
       kybVerifiedAt: kybCompanyProfile.verifiedAt,
       kybRequestId: hasKybRequest ? latestKybRequestId : undefined,
       status: "queued"
     };
 
     setRegistryQueue((previous) => [record, ...previous]);
-    setAssetDraft(defaultAssetDraft(chainId || env.chainId));
+    setAssetDraft((previous) => ({
+      ...defaultAssetDraft(chainId || env.chainId),
+      buyerVerificationRequirement: previous.buyerVerificationRequirement
+    }));
     setStatus(`Asset "${record.name}" added to queue for ${kybCompanyProfile.legalName}. Submit it to CRE from the queue.`);
   }
 
@@ -2328,40 +3470,97 @@ export default function App() {
   const worldIdPrecheckMode = parseWorldIdPrecheckMode(env.worldIdPrecheckMode);
 
   const walletLabel = account ? shortAddress(account) : "Wallet not connected";
+  const walletButtonLabel =
+    isAppKitConnected && (account || appKitAddress)
+      ? shortAddress(account || appKitAddress || "")
+      : "Connect wallet";
   const chainLabel = chainId || expectedChainId || "-";
 
   const attestationFlags = attestation ? BigInt(attestation.flags) : 0n;
   const hasKycFlag = (attestationFlags & 1n) === 1n;
   const hasWorldIdFlag = (attestationFlags & env.worldIdFlag) === env.worldIdFlag;
   const hasKybFlag = (attestationFlags & 4n) === 4n;
+  const nowTs = Math.floor(Date.now() / 1000);
+  const hasActiveWorldIdFlag =
+    hasWorldIdFlag &&
+    (verificationExpirations.worldIdExpiration === 0 || verificationExpirations.worldIdExpiration >= nowTs);
+  const hasActiveKybFlag =
+    hasKybFlag && (verificationExpirations.kybExpiration === 0 || verificationExpirations.kybExpiration >= nowTs);
 
   const kybStatusLabel =
     kybStubStatus === "verified" ? "Verified" : kybStubStatus === "in_review" ? "In review" : "Not started";
-  const kybCompanyLinked = hasKybFlag && Boolean(kybCompanyProfile);
+  const kybCompanyLinked = hasActiveKybFlag && Boolean(kybCompanyProfile);
   const nextGeneratedPresetName =
     GENERATED_ASSET_PRESETS.length > 0
       ? GENERATED_ASSET_PRESETS[generatedPresetCursor % GENERATED_ASSET_PRESETS.length].name
       : "Preset";
 
-  const verificationDoneCount = [verify.ok, worldIdVerified, hasKybFlag].filter(Boolean).length;
-  const verificationPercent = Math.round((verificationDoneCount / 3) * 100);
+  const kycQuickLabel = verify.ok ? "Verified" : hasSdkToken ? "In progress" : "Pending";
+  const kycQuickBadgeClass = verify.ok ? "ok" : hasSdkToken ? "neutral" : "warn";
+  const worldIdQuickLabel = worldIdVerified ? "Verified" : "Pending";
+  const worldIdQuickBadgeClass = worldIdVerified ? "ok" : "warn";
+  const kybQuickLabel = hasActiveKybFlag ? "Verified" : kybStatusLabel;
+  const kybQuickBadgeClass = hasActiveKybFlag ? "ok" : kybStubStatus === "in_review" ? "neutral" : "warn";
+  const kycQuickExpLabel = hasKycFlag ? formatUnixTimestamp(verificationExpirations.humanExpiration) : "-";
+  const worldIdQuickExpLabel = hasWorldIdFlag ? formatUnixTimestamp(verificationExpirations.worldIdExpiration) : "-";
+  const kybQuickExpLabel = hasKybFlag ? formatUnixTimestamp(verificationExpirations.kybExpiration) : "-";
+  const kybActionCompleted = hasActiveKybFlag || kybStubStatus === "verified";
+  const kybCompanyProfileVisible = kybActionCompleted;
+  const kybActionLabel = kybActionCompleted ? "Completed" : kybStubStatus === "in_review" ? "Approve KYB" : "Start KYB";
+  const kybActionDisabled = busy || !account || !verify.ok || kybActionCompleted;
+  const assetRegistryIntakeLocked = !verify.ok || !hasActiveKybFlag;
+  const assetRegistryIntakeLockReason = !verify.ok ? "Complete KYC first to unlock asset intake." : "Complete KYB to unlock asset intake.";
+  const runKybAction = () => {
+    if (kybStubStatus === "in_review") {
+      approveKybStub();
+      return;
+    }
+    void startKybStub();
+  };
 
   const globalBusy = busy || waitingPacket || refreshingStatus || syncWaiting;
   const progressCopy = getProgressCopy(status, waitingPacket, refreshingStatus, syncWaiting);
+  const assetsReadProvider = publicReadProvider ?? provider ?? null;
+  const wantsMineAssets = assetsViewMode === "mine" && Boolean(account);
+  const canReadPublicAssets = Boolean(assetsReadProvider);
+  const canReadMineAssets = Boolean(assetsReadProvider && account);
+  const canReadCurrentAssetsView = wantsMineAssets ? canReadMineAssets : canReadPublicAssets;
+
+  const refreshAssetsGallery = (): void => {
+    if (!assetsReadProvider) {
+      return;
+    }
+    const scope = wantsMineAssets ? "owner" : "public";
+    const owner = wantsMineAssets ? account : undefined;
+    void refreshVerifiedAssets(owner, assetsReadProvider, scope);
+  };
 
   return (
     <div className="flow-page">
-      <header className="hero-card card">
+      <header className="hero-card">
         <div>
-          <p className="eyebrow">PassStore CRE Flow</p>
-          <h1>Verification + Registry Console</h1>
+          <h1>Verified Asset Market</h1>
           <p className="hero-text">
-            One interface for wallet session encryption, KYC, World ID, KYB gating and asset registry intake.
+            One place to manage cross-chain assets that require KYC, World ID, or KYB verification.
           </p>
         </div>
         <div className="hero-actions">
+          <div className="hero-verify-pills" aria-label="Verification summary">
+            <span className={`pill hero-verify-pill ${kycQuickBadgeClass}`}>
+              <span className="hero-verify-pill-label">KYC: {kycQuickLabel}</span>
+              <span className="hero-verify-pill-exp">Exp: {kycQuickExpLabel}</span>
+            </span>
+            <span className={`pill hero-verify-pill ${worldIdQuickBadgeClass}`}>
+              <span className="hero-verify-pill-label">World ID: {worldIdQuickLabel}</span>
+              <span className="hero-verify-pill-exp">Exp: {worldIdQuickExpLabel}</span>
+            </span>
+            <span className={`pill hero-verify-pill ${kybQuickBadgeClass}`}>
+              <span className="hero-verify-pill-label">KYB: {kybQuickLabel}</span>
+              <span className="hero-verify-pill-exp">Exp: {kybQuickExpLabel}</span>
+            </span>
+          </div>
           <button className="btn primary" onClick={connectWallet} disabled={busy}>
-            {isAppKitConnected ? "Wallet" : "Connect wallet"}
+            {walletButtonLabel}
           </button>
           <button className="btn" onClick={() => void refreshStatusWithRetry()} disabled={busy || !account || networkMismatch}>
             Check status
@@ -2369,14 +3568,61 @@ export default function App() {
         </div>
       </header>
 
+      <section className="card section-tabs-card" aria-label="Console sections">
+        <div className="section-tabs">
+          <button
+            className={`section-tab ${activeTab === "assets" ? "active" : ""}`}
+            onClick={() => setActiveTab("assets")}
+            aria-pressed={activeTab === "assets"}
+            type="button"
+          >
+            <span>Assets</span>
+          </button>
+          <button
+            className={`section-tab ${activeTab === "personal" ? "active" : ""}`}
+            onClick={() => setActiveTab("personal")}
+            aria-pressed={activeTab === "personal"}
+            type="button"
+          >
+            <span>Personal</span>
+          </button>
+          <button
+            className={`section-tab ${activeTab === "business" ? "active" : ""}`}
+            onClick={() => setActiveTab("business")}
+            aria-pressed={activeTab === "business"}
+            type="button"
+          >
+            <span>Business</span>
+          </button>
+        </div>
+      </section>
+
+      {activeTab === "personal" || activeTab === "business" ? (
       <section className="grid two">
+        {activeTab === "personal" ? (
         <article className="card wallet-card">
           <div className="card-head">
-            <h2>Wallet Session</h2>
-            <span className={`badge ${isAppKitConnected ? "ok" : "warn"}`}>{isAppKitConnected ? "Connected" : "Disconnected"}</span>
+            <h2>KYC</h2>
+            <span className={`badge ${verify.ok ? "ok" : hasSdkToken || waitingPacket ? "neutral" : "warn"}`}>
+              {verify.ok ? "Verified" : hasSdkToken || waitingPacket ? "In progress" : "Pending"}
+            </span>
           </div>
 
-          <dl className="facts">
+          <p className="card-text">
+            Complete KYC to unlock business verification and asset submissions in the marketplace flow.
+          </p>
+
+          <div className="wallet-actions">
+            <button
+              className="btn primary"
+              onClick={() => void goToKyc()}
+              disabled={busy || !account || networkMismatch || waitingPacket || verify.ok}
+            >
+              {verify.ok ? "Completed" : hasSdkToken ? "Restart KYC" : "Start KYC"}
+            </button>
+          </div>
+
+          <dl className="kyc-kv-grid">
             <div>
               <dt>Address</dt>
               <dd>{walletLabel}</dd>
@@ -2393,128 +3639,31 @@ export default function App() {
               <dt>Encryption</dt>
               <dd>{encryptionReady ? "Ready" : "Missing"}</dd>
             </div>
+            <div>
+              <dt>Request ID</dt>
+              <dd>{requestId}</dd>
+            </div>
+            <div>
+              <dt>SDK packet</dt>
+              <dd>{sdkPacketStageLabel}</dd>
+            </div>
+            <div>
+              <dt>Packet exp</dt>
+              <dd>{sdkPacketExpiryLabel}</dd>
+            </div>
+            <div>
+              <dt>SDK token</dt>
+              <dd className="mono">{sdkTokenPreview}</dd>
+            </div>
+            <div className="kyc-kv-full">
+              <dt>CRE issuer</dt>
+              <dd>{creIssuerAllowed === null ? "-" : creIssuerAllowed ? "allowed" : "not allowed"}</dd>
+            </div>
           </dl>
-
-          <div className="wallet-actions">
-            <button className="btn" onClick={enableEncryption} disabled={busy || !account || networkMismatch}>
-              Enable encryption
-            </button>
-            <button className="btn" onClick={() => void goToKyc()} disabled={busy || !account || networkMismatch || waitingPacket}>
-              {hasSdkToken ? "Restart KYC" : "Start KYC"}
-            </button>
-            <button className="btn" onClick={() => void refreshStatusWithRetry()} disabled={busy || !account || networkMismatch}>
-              Sync + refresh
-            </button>
-          </div>
-
-          <div className="meta-row">
-            <span>Request ID: {requestId}</span>
-            <span>SDK packet: {sdkPacketStageLabel}</span>
-            <span>Packet exp: {sdkPacketExpiryLabel}</span>
-            <span>SDK token: {sdkTokenPreview}</span>
-            <span>
-              CRE issuer: {creIssuerAllowed === null ? "-" : creIssuerAllowed ? "allowed" : "not allowed"}
-            </span>
-          </div>
         </article>
+        ) : null}
 
-        <article className="card progress-card">
-          <div className="card-head">
-            <h2>Verification Pipeline</h2>
-            <span className="badge neutral">{verificationPercent}% complete</span>
-          </div>
-
-          <div className="step-list">
-            <div className="step-item">
-              <div>
-                <strong>1. KYC (Sumsub)</strong>
-                <p>Required for compliance pass and KYB start.</p>
-              </div>
-              <span className={`badge ${verify.ok ? "ok" : "warn"}`}>{verify.ok ? "Verified" : hasSdkToken ? "In progress" : "Pending"}</span>
-            </div>
-
-            <div className="step-item">
-              <div>
-                <strong>2. World ID</strong>
-                <p>Optional second identity signal for your policy model.</p>
-              </div>
-              <span className={`badge ${worldIdVerified ? "ok" : "warn"}`}>{worldIdVerified ? "Verified" : "Pending"}</span>
-            </div>
-
-            <div className="step-item">
-              <div>
-                <strong>3. KYB (stub)</strong>
-                <p>Dev placeholder. Asset issuer company is sourced from this profile.</p>
-              </div>
-              <span className={`badge ${hasKybFlag ? "ok" : kybStubStatus === "in_review" ? "neutral" : "warn"}`}>
-                {hasKybFlag ? "Verified" : kybStatusLabel}
-              </span>
-            </div>
-          </div>
-
-          <div className="kyb-company-box">
-            <div className="kyb-company-head">
-              <strong>KYB Company Profile</strong>
-              <span className={`badge ${kybCompanyLinked ? "ok" : "warn"}`}>{kybCompanyLinked ? "Linked" : "Not linked"}</span>
-            </div>
-            <div className="kyb-company-grid">
-              <label>
-                Legal name
-                <input
-                  value={kybCompanyProfile?.legalName ?? "-"}
-                  readOnly
-                />
-              </label>
-              <label>
-                Company ref
-                <input
-                  value={kybCompanyProfile?.companyRef ?? "-"}
-                  readOnly
-                />
-              </label>
-              <label>
-                Jurisdiction
-                <input
-                  value={kybCompanyProfile?.jurisdiction ?? "-"}
-                  readOnly
-                />
-              </label>
-              <label>
-                Registration country
-                <input
-                  value={kybCompanyProfile?.registrationCountry || "-"}
-                  readOnly
-                />
-              </label>
-              <label className="full-width">
-                Website
-                <input
-                  value={kybCompanyProfile?.website || "-"}
-                  readOnly
-                />
-              </label>
-            </div>
-            <p className="hint">Stub mode: company profile is auto-generated from wallet and is not editable.</p>
-          </div>
-
-          <div className="kyb-actions">
-            <button className="btn" onClick={() => void startKybStub()} disabled={busy || !account || !verify.ok || kybStubStatus !== "not_started"}>
-              Start KYB stub
-            </button>
-            <button className="btn" onClick={approveKybStub} disabled={busy || !account || !verify.ok || kybStubStatus !== "in_review"}>
-              Approve KYB stub
-            </button>
-            <button className="btn ghost" onClick={resetKybStub} disabled={busy || !account || kybStubStatus === "not_started"}>
-              Reset
-            </button>
-          </div>
-          <p className="hint">
-            Onchain KYB request: {hasKybRequest && latestKybRequestId !== "-" ? `#${latestKybRequestId}` : "not created"}.
-          </p>
-        </article>
-      </section>
-
-      <section className="grid two">
+        {activeTab === "personal" ? (
         <article className="card worldid-card">
           <div className="card-head">
             <h2>World ID Gate</h2>
@@ -2536,8 +3685,12 @@ export default function App() {
               onError={onWorldIdError}
             >
               {({ open: openIdKit }: { open: () => void }) => (
-                <button className="btn primary" onClick={openIdKit} disabled={busy || !account || networkMismatch}>
-                  Start World ID
+                <button
+                  className="btn primary"
+                  onClick={openIdKit}
+                  disabled={busy || !account || networkMismatch || worldIdVerified}
+                >
+                  {worldIdVerified ? "Completed" : "Start World ID"}
                 </button>
               )}
             </IDKitWidget>
@@ -2556,231 +3709,308 @@ export default function App() {
             {worldIdErrorCode ? <span className="text-warn">Error code: {worldIdErrorCode}</span> : null}
           </div>
         </article>
+        ) : null}
 
-        <article className="card snapshot-card">
+        {activeTab === "business" ? (
+        <article className="card progress-card">
           <div className="card-head">
-            <h2>Onchain Snapshot</h2>
-            <span className={`badge ${verify.ok ? "ok" : "warn"}`}>{reasonLabel(verify.reason)}</span>
+            <h2>KYB</h2>
+            <div className="card-head-badges">
+              <span className="card-head-note">KYC Required</span>
+              <span className={`badge ${kybQuickBadgeClass}`}>{kybQuickLabel}</span>
+            </div>
           </div>
 
-          <dl className="facts compact">
-            <div>
-              <dt>Attestation exists</dt>
-              <dd>{attestation?.exists ? "yes" : "no"}</dd>
-            </div>
-            <div>
-              <dt>Revoked</dt>
-              <dd>{attestation?.revoked ? "yes" : "no"}</dd>
-            </div>
-            <div>
-              <dt>Expiration</dt>
-              <dd>{formatUnixTimestamp(attestation?.expiration ?? 0)}</dd>
-            </div>
-            <div>
-              <dt>Risk score</dt>
-              <dd>{attestation?.riskScore ?? "-"}</dd>
-            </div>
-          </dl>
-
-          <div className="flag-row">
-            <span className={`pill ${hasKycFlag ? "ok" : "warn"}`}>KYC flag</span>
-            <span className={`pill ${hasWorldIdFlag ? "ok" : "warn"}`}>World ID flag</span>
-            <span className={`pill ${hasKybFlag ? "ok" : "warn"}`}>KYB flag</span>
-          </div>
-
-          <p className="hint">
-            Current KYB is a frontend stub. Once CRE KYB provider is wired, this card will show real onchain KYB attestation.
+          <p className="card-text">
+            Required for a company that wants to list a verified asset in the marketplace.
           </p>
-          <p className="hint">Broker KYB request: {hasKybRequest && latestKybRequestId !== "-" ? `#${latestKybRequestId}` : "none"}</p>
-        </article>
-      </section>
 
-      <section className="card registry-card">
-        <div className="card-head">
-          <h2>Asset Registry Intake</h2>
-          <span className={`badge ${verify.ok && hasKybFlag ? "ok" : "warn"}`}>
-            {verify.ok && hasKybFlag ? "Ready" : "Locked"}
-          </span>
-        </div>
-
-        <p className="card-text">
-          This replaces demo asset cards. Add only real assets here. Issuer company is pulled from KYB.
-        </p>
-
-        <form className="registry-form" onSubmit={addAssetToQueue}>
-          <div className="kyb-linked-company full-width">
-            <div className="kyb-linked-head">
-              <strong>Company from KYB</strong>
-              <span className={`badge ${kybCompanyLinked ? "ok" : "warn"}`}>{kybCompanyLinked ? "Ready" : "Missing"}</span>
-            </div>
-            {kybCompanyProfile ? (
-              <div className="kyb-linked-grid">
+          <div className="business-verify-grid">
+            <div className="kyb-company-box">
+              <div className="kyb-company-head">
+                <strong>KYB Company Profile</strong>
+                {kybCompanyLinked ? <span className="badge ok">Linked</span> : null}
+              </div>
+              <div className="kyb-company-grid">
                 <label>
                   Legal name
-                  <input value={kybCompanyProfile.legalName} readOnly />
+                  <input
+                    value={kybCompanyProfileVisible ? (kybCompanyProfile?.legalName ?? "-") : ""}
+                    readOnly
+                  />
                 </label>
                 <label>
                   Company ref
-                  <input value={kybCompanyProfile.companyRef} readOnly />
+                  <input
+                    value={kybCompanyProfileVisible ? (kybCompanyProfile?.companyRef ?? "-") : ""}
+                    readOnly
+                  />
                 </label>
                 <label>
                   Jurisdiction
-                  <input value={kybCompanyProfile.jurisdiction} readOnly />
+                  <input
+                    value={kybCompanyProfileVisible ? (kybCompanyProfile?.jurisdiction ?? "-") : ""}
+                    readOnly
+                  />
                 </label>
                 <label>
                   Registration country
-                  <input value={kybCompanyProfile.registrationCountry || "-"} readOnly />
+                  <input
+                    value={kybCompanyProfileVisible ? (kybCompanyProfile?.registrationCountry || "-") : ""}
+                    readOnly
+                  />
                 </label>
                 <label className="full-width">
                   Website
-                  <input value={kybCompanyProfile.website || "-"} readOnly />
+                  <input
+                    value={kybCompanyProfileVisible ? (kybCompanyProfile?.website || "-") : ""}
+                    readOnly
+                  />
                 </label>
               </div>
-            ) : (
-              <p className="empty-state">No verified KYB company profile yet. Complete KYB step first.</p>
-            )}
-          </div>
-
-          <label>
-            Asset name
-            <input
-              value={assetDraft.name}
-              onChange={(event) => updateDraft("name", event.target.value)}
-              placeholder="Example: Stadium Ticket Pass"
-            />
-          </label>
-
-          <label>
-            Metadata URI
-            <input
-              value={assetDraft.metadataUri}
-              onChange={(event) => updateDraft("metadataUri", event.target.value)}
-              placeholder="ipfs://... or https://..."
-            />
-          </label>
-
-          <label>
-            Metadata hash
-            <input
-              value={assetDraft.metadataHash}
-              onChange={(event) => updateDraft("metadataHash", event.target.value)}
-              placeholder="0x..."
-            />
-          </label>
-
-          <label className="full-width">
-            Notes
-            <textarea
-              value={assetDraft.notes}
-              onChange={(event) => updateDraft("notes", event.target.value)}
-              placeholder="Issuer notes, legal context, ownership model"
-              rows={3}
-            />
-          </label>
-
-          <div className="deployments-box full-width">
-            <div className="deployments-head">
-              <strong>Network deployments</strong>
-              <button className="btn" type="button" onClick={addDeploymentRow} disabled={busy || !account}>
-                + Add network
-              </button>
+              <p className="hint">
+                {kybCompanyProfileVisible
+                  ? "Stub mode: company profile is auto-generated from wallet and is not editable."
+                  : "Company profile fields will appear after KYB is completed."}
+              </p>
             </div>
 
-            <div className="deployments-list">
-              {assetDraft.deployments.map((deployment, index) => (
-                <div className="deployment-row" key={deployment.id}>
-                  <label>
-                    Network
-                    <select
-                      value={deployment.chainId}
-                      onChange={(event) => updateDeploymentDraft(deployment.id, "chainId", event.target.value)}
-                    >
-                      {NETWORK_OPTIONS.map((option) => (
-                        <option key={option.chainId} value={option.chainId}>
-                          {option.label} ({option.chainId})
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+            <div className="kyb-provider-stack">
+              <div className="kyb-company-box kyb-provider-box">
+                <div className="kyb-company-head">
+                  <strong>KYB Provider Slot</strong>
+                </div>
+                <p className="card-text">
+                  This area can be connected to any KYB provider integration and mapped to the same KYB flow.
+                </p>
+                <div className="kyb-provider-tags">
+                  <span className="pill">Persona</span>
+                  <span className="pill">Sumsub KYB</span>
+                  <span className="pill">Middesk</span>
+                  <span className="pill">Alloy</span>
+                  <span className="pill">Custom API</span>
+                </div>
+                <p className="hint">Replace the current stub with provider SDK/webhooks + review status sync.</p>
+              </div>
 
-                  <label>
-                    Contract address
-                    <input
-                      value={deployment.tokenAddress}
-                      onChange={(event) => updateDeploymentDraft(deployment.id, "tokenAddress", event.target.value)}
-                      placeholder="0x..."
-                    />
-                  </label>
-
-                  <label>
-                    Token type
-                    <select
-                      value={deployment.tokenStandard}
-                      onChange={(event) => updateDeploymentDraft(deployment.id, "tokenStandard", event.target.value as TokenStandard)}
-                    >
-                      <option value="ERC20">ERC20</option>
-                      <option value="ERC721">ERC721 (NFT)</option>
-                      <option value="ERC1155">ERC1155</option>
-                    </select>
-                  </label>
-
-                  <label>
-                    Token ID
-                    <input
-                      value={deployment.tokenId}
-                      onChange={(event) => updateDeploymentDraft(deployment.id, "tokenId", event.target.value)}
-                      placeholder={deployment.tokenStandard === "ERC20" ? "Fixed: 0" : "Token ID"}
-                      inputMode="numeric"
-                      disabled={deployment.tokenStandard === "ERC20"}
-                    />
-                  </label>
-
-                  <button
-                    className="deployment-remove"
-                    type="button"
-                    onClick={() => removeDeploymentRow(deployment.id)}
-                    disabled={assetDraft.deployments.length <= 1}
-                  >
-                    Remove #{index + 1}
+              <div className="kyb-provider-controls">
+                <div className="kyb-actions">
+                  <button className="btn primary" onClick={runKybAction} disabled={kybActionDisabled}>
+                    {kybActionLabel}
+                  </button>
+                  <button className="btn danger" onClick={resetKybStub} disabled={busy || !account || kybStubStatus === "not_started"}>
+                    Reset
                   </button>
                 </div>
-              ))}
-            </div>
-            <p className="hint">Use one row per network where this asset is deployed. Metadata fields above are shared for all rows.</p>
-          </div>
 
-          <div className="form-actions full-width">
-            <button className="btn" type="button" onClick={generateAssetDraftFromPreset} disabled={busy}>
-              Gen Asset
-            </button>
-            <button className="btn primary" type="submit" disabled={busy || !account || !verify.ok || !hasKybFlag}>
-              Add to queue
-            </button>
-            <span className="hint">Queue is wallet-scoped local draft. Use submit actions below to send onchain requests. Next preset: {nextGeneratedPresetName}</span>
+                <p className="hint">
+                  Onchain KYB request: {hasKybRequest && latestKybRequestId !== "-" ? `#${latestKybRequestId}` : "not created"}.
+                </p>
+              </div>
+            </div>
+          </div>
+        </article>
+        ) : null}
+      </section>
+      ) : null}
+
+      {activeTab === "assets" || activeTab === "business" ? (
+      <section className={`card registry-card${activeTab === "assets" ? " registry-card-assets" : ""}`}>
+        {activeTab === "business" ? (
+          <>
+          <div className="card-head">
+            <h2>Asset Registry Intake</h2>
+            <span className={`badge ${verify.ok && hasActiveKybFlag ? "ok" : "warn"}`}>
+              {verify.ok && hasActiveKybFlag ? "Ready" : "Locked"}
+            </span>
+          </div>
+          <p className="card-text">
+            Add only real assets here. Issuer company is pulled from KYB and submissions are queued before onchain send.
+          </p>
+          </>
+        ) : null}
+
+        {activeTab === "business" ? (
+        <>
+        {assetRegistryIntakeLocked ? <p className="registry-lock-note">{assetRegistryIntakeLockReason}</p> : null}
+        <form className={`registry-form${assetRegistryIntakeLocked ? " registry-intake-disabled" : ""}`} onSubmit={addAssetToQueue}>
+          <div className="registry-top-grid full-width">
+            <div className="registry-block">
+              <div className="registry-block-head">
+                <h3>Asset Details</h3>
+              </div>
+              <div className="registry-details-grid">
+                <label>
+                  Asset name
+                  <input
+                    value={assetDraft.name}
+                    onChange={(event) => updateDraft("name", event.target.value)}
+                    placeholder="Example: Stadium Ticket Pass"
+                  />
+                </label>
+
+                <label>
+                  Metadata URI
+                  <input
+                    value={assetDraft.metadataUri}
+                    onChange={(event) => updateDraft("metadataUri", event.target.value)}
+                    placeholder="ipfs://... or https://..."
+                  />
+                </label>
+
+                <label>
+                  Metadata hash
+                  <input
+                    value={assetDraft.metadataHash}
+                    onChange={(event) => updateDraft("metadataHash", event.target.value)}
+                    placeholder="0x..."
+                  />
+                </label>
+
+                <label>
+                  Buyer verification
+                  <select
+                    value={assetDraft.buyerVerificationRequirement}
+                    onChange={(event) =>
+                      updateDraft("buyerVerificationRequirement", event.target.value as BuyerVerificationRequirement)
+                    }
+                  >
+                    <option value="open">Open (no verification)</option>
+                    <option value="kyc">KYC</option>
+                    <option value="worldid">World ID</option>
+                    <option value="kyc_worldid">KYC + World ID</option>
+                  </select>
+                </label>
+
+                <label className="full-width">
+                  Notes
+                  <textarea
+                    value={assetDraft.notes}
+                    onChange={(event) => updateDraft("notes", event.target.value)}
+                    placeholder="Issuer notes, legal context, ownership model"
+                    rows={3}
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div className="registry-block">
+              <div className="deployments-head">
+                <h3>Network Contracts</h3>
+                <button className="btn" type="button" onClick={addDeploymentRow} disabled={busy || !account}>
+                  + Add network
+                </button>
+              </div>
+
+              <div className="deployments-list">
+                {assetDraft.deployments.map((deployment, index) => (
+                  <div className="deployment-row" key={deployment.id}>
+                    <label>
+                      Network
+                      <select
+                        value={deployment.chainId}
+                        onChange={(event) => updateDeploymentDraft(deployment.id, "chainId", event.target.value)}
+                      >
+                        {NETWORK_OPTIONS.map((option) => (
+                          <option key={option.chainId} value={option.chainId}>
+                            {option.label} ({option.chainId})
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label>
+                      Contract address
+                      <input
+                        value={deployment.tokenAddress}
+                        onChange={(event) => updateDeploymentDraft(deployment.id, "tokenAddress", event.target.value)}
+                        placeholder="0x..."
+                      />
+                    </label>
+
+                    <label>
+                      Token type
+                      <select
+                        value={deployment.tokenStandard}
+                        onChange={(event) => updateDeploymentDraft(deployment.id, "tokenStandard", event.target.value as TokenStandard)}
+                      >
+                        <option value="ERC20">ERC20</option>
+                        <option value="ERC721">ERC721 (NFT)</option>
+                        <option value="ERC1155">ERC1155</option>
+                      </select>
+                    </label>
+
+                    <label>
+                      Token ID
+                      <input
+                        value={deployment.tokenId}
+                        onChange={(event) => updateDeploymentDraft(deployment.id, "tokenId", event.target.value)}
+                        placeholder={deployment.tokenStandard === "ERC20" ? "Fixed: 0" : "Token ID"}
+                        inputMode="numeric"
+                        disabled={deployment.tokenStandard === "ERC20"}
+                      />
+                    </label>
+
+                    <button
+                      className="deployment-remove"
+                      type="button"
+                      onClick={() => removeDeploymentRow(deployment.id)}
+                      disabled={assetDraft.deployments.length <= 1}
+                      title={`Remove deployment #${index + 1}`}
+                      aria-label={`Remove deployment #${index + 1}`}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path
+                          d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 6v8h2V9h-2Zm4 0v8h2V9h-2ZM7 9v10c0 1.1.9 2 2 2h6a2 2 0 0 0 2-2V9H7Z"
+                          fill="currentColor"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <p className="hint">Use one row per network contract where this asset is listed. Metadata fields above are shared for all rows.</p>
+              <div className="form-actions">
+                <label className="form-check">
+                  <input
+                    type="checkbox"
+                    checked={createRealIpfsData}
+                    onChange={(event) => setCreateRealIpfsData(event.target.checked)}
+                    disabled={busy || generatingAsset}
+                  />
+                  <span>Create real IPFS data</span>
+                </label>
+                <button className="btn" type="button" onClick={generateAssetDraftFromPreset} disabled={busy || generatingAsset}>
+                  {generatingAsset ? (
+                    <>
+                      <span className="btn-spinner" aria-hidden="true" />
+                      Generating...
+                    </>
+                  ) : (
+                    "Gen Asset"
+                  )}
+                </button>
+                <span className="form-actions-break" aria-hidden="true" />
+                <button className="btn primary" type="submit" disabled={busy || generatingAsset || !account || !verify.ok || !hasActiveKybFlag}>
+                  Add to queue
+                </button>
+                <span className="hint">
+                  Queue is wallet-scoped local draft. Use submit actions below to send onchain requests. Next preset: {nextGeneratedPresetName}
+                  {createRealIpfsData ? " · Gen Asset uploads SVG + metadata to Pinata" : ""}
+                </span>
+              </div>
+            </div>
           </div>
         </form>
+        </>
+        ) : null}
 
-        <div className="queue-wrap">
+        {activeTab === "business" ? (
+        <div className={`queue-wrap registry-block${assetRegistryIntakeLocked ? " registry-intake-disabled" : ""}`}>
           <div className="queue-head">
-            <h3>Queued Assets</h3>
-            <div className="queue-actions">
-              <button
-                className="btn"
-                type="button"
-                onClick={() => void submitAllQueuedAssets()}
-                disabled={busy || !account || !hasKybRequest || latestKybRequestId === "-"}
-              >
-                Submit all to CRE
-              </button>
-              <button className="btn" type="button" onClick={() => void refreshVerifiedAssets()} disabled={busy || !account}>
-                {refreshingAssets ? "Refreshing..." : "Refresh verified"}
-              </button>
-            </div>
+            <h3>Queue</h3>
+            <span className={`badge ${registryQueue.length > 0 ? "neutral" : "warn"}`}>{registryQueue.length}</span>
           </div>
-          <p className="hint">
-            KYB request ID: {hasKybRequest && latestKybRequestId !== "-" ? `#${latestKybRequestId}` : "missing"}.
-            Asset submissions use this ID in onchain broker events.
-          </p>
           {registryQueue.length === 0 ? (
             <p className="empty-state">No assets queued yet. Submit your first real asset above.</p>
           ) : (
@@ -2853,92 +4083,275 @@ export default function App() {
               </table>
             </div>
           )}
+          <div className="queue-actions">
+            <button
+              className="btn primary"
+              type="button"
+              onClick={() => void submitAllQueuedAssets()}
+              disabled={busy || !account || !hasActiveKybFlag || !hasKybRequest || latestKybRequestId === "-"}
+            >
+              Submit all to CRE
+            </button>
+            <button className="btn" type="button" onClick={() => void refreshVerifiedAssets()} disabled={busy || !account || assetRegistryIntakeLocked}>
+              {refreshingAssets ? "Refreshing..." : "Refresh verified"}
+            </button>
+          </div>
         </div>
+        ) : null}
 
-        <div className="verified-wrap">
+        {activeTab === "assets" ? (
+        <div className="verified-wrap verified-wrap-assets">
           <div className="queue-head">
             <h3>Verified Assets</h3>
-            <span className={`badge ${verifiedAssets.length > 0 ? "ok" : "neutral"}`}>{verifiedAssets.length}</span>
+            <div className="queue-actions">
+              <div className="assets-scope-toggle" role="group" aria-label="Asset list scope">
+                <button
+                  className={`assets-scope-btn${assetsViewMode === "all" ? " active" : ""}`}
+                  type="button"
+                  onClick={() => setAssetsViewMode("all")}
+                >
+                  All assets
+                </button>
+                <button
+                  className={`assets-scope-btn${assetsViewMode === "mine" ? " active" : ""}`}
+                  type="button"
+                  onClick={() => setAssetsViewMode("mine")}
+                  disabled={!account}
+                  title={!account ? "Connect wallet to view your assets" : "Show assets where you are the owner"}
+                >
+                  Published by me
+                </button>
+              </div>
+              <span className={`badge ${verifiedAssets.length > 0 ? "ok" : "neutral"}`}>{verifiedAssets.length}</span>
+              <button
+                className="btn"
+                type="button"
+                onClick={() => {
+                  setResolvedAssetMetadataByUri({});
+                  refreshAssetsGallery();
+                }}
+                disabled={busy || !canReadCurrentAssetsView}
+              >
+                {refreshingAssets ? "Refreshing..." : "Refresh"}
+              </button>
+            </div>
           </div>
 
           {verifiedAssets.length === 0 ? (
             <p className="empty-state">
-              No verified assets yet. Submit queued assets and wait for CRE to attest them in `AssetRegistry`.
+              {wantsMineAssets
+                ? "No verified assets found for your wallet yet."
+                : "No verified assets yet. Submit queued assets and wait for CRE to attest them in `AssetRegistry`."}
             </p>
           ) : (
             <div className="verified-grid">
-              {verifiedAssets.map((asset) => (
-                <article className="verified-card" key={asset.groupId}>
-                  <div className="verified-card-head">
-                    <strong>{asset.name}</strong>
-                    <span className="badge ok">{asset.deployments.length} network{asset.deployments.length > 1 ? "s" : ""}</span>
-                  </div>
-                  <div className="verified-chip-row">
-                    {asset.deployments.map((deployment) => (
-                      <span className="pill ok" key={`${asset.groupId}-${deployment.chainId}-${deployment.assetKey}`}>
-                        {chainName(deployment.chainId)}
-                      </span>
-                    ))}
-                  </div>
-                  <dl className="verified-meta">
-                    <div>
-                      <dt>Owner</dt>
-                      <dd className="mono">{asset.owner}</dd>
-                    </div>
-                    <div>
-                      <dt>Latest verified at</dt>
-                      <dd>{formatUnixTimestamp(asset.latestVerifiedAt)}</dd>
-                    </div>
-                    <div>
-                      <dt>Deployments</dt>
-                      <dd>{asset.deployments.length}</dd>
-                    </div>
-                    <div>
-                      <dt>Metadata URI</dt>
-                      <dd className="mono">{asset.metadataUri || "-"}</dd>
-                    </div>
-                    <div>
-                      <dt>Metadata hash</dt>
-                      <dd className="mono">{asset.metadataHash || "-"}</dd>
-                    </div>
-                  </dl>
+              {verifiedAssets.map((asset) => {
+                const metadataPreview = resolvedAssetMetadataByUri[asset.metadataUri];
+                const metadataHttpUrl = metadataPreview?.metadataHttpUrl || contentUriToHttpUrl(asset.metadataUri);
+                const imageHttpUrl = metadataPreview?.imageHttpUrl || "";
+                const inlineImageDataUrl = metadataPreview?.inlineImageDataUrl || "";
+                const previewImageUrl = inlineImageDataUrl || imageHttpUrl;
+                const imageHttpFallbackUrls = inlineImageDataUrl
+                  ? []
+                  : metadataPreview?.imageHttpFallbackUrls ?? (imageHttpUrl ? [imageHttpUrl] : []);
+                const cardTitle = metadataPreview?.name || asset.name;
+                const cardDescription = metadataPreview?.description || "";
+                const buyerRequirement =
+                  metadataPreview?.buyerVerificationRequirement || asset.buyerVerificationRequirement || "open";
+                const buyerRequirementLabel = buyerVerificationRequirementLabel(buyerRequirement);
+                const canBuyByVerification = buyerVerificationRequirementSatisfied(buyerRequirement, verify.ok, hasActiveWorldIdFlag);
+                const canBuy = Boolean(account) && canBuyByVerification;
+                const buyButtonTitle = !account
+                  ? "Connect wallet to buy"
+                  : canBuy
+                    ? `Buy access: ${buyerRequirementLabel}`
+                    : buyerVerificationRequirementHelpText(buyerRequirement);
+                const cardCompanyProfileFallback =
+                  account && asset.owner.toLowerCase() === account.toLowerCase() ? kybCompanyProfile : null;
+                const metadataCompanyLegalName = metadataPreview?.companyLegalName?.trim();
+                const metadataCompanyRef = metadataPreview?.companyRef?.trim();
+                const metadataCompanyWebsite = metadataPreview?.companyWebsite?.trim();
+                const metadataCompanyJurisdiction = metadataPreview?.companyJurisdiction?.trim();
+                const companyName =
+                  metadataCompanyLegalName ||
+                  asset.companyLegalName?.trim() ||
+                  cardCompanyProfileFallback?.legalName?.trim() ||
+                  "Company unavailable";
+                const companySiteUrl = externalHttpUrl(
+                  metadataCompanyWebsite || asset.companyWebsite || cardCompanyProfileFallback?.website || ""
+                );
+                const companyMeta = [
+                  metadataCompanyRef || asset.companyRef || cardCompanyProfileFallback?.companyRef,
+                  metadataCompanyJurisdiction || asset.companyJurisdiction || cardCompanyProfileFallback?.jurisdiction
+                ]
+                  .filter(Boolean)
+                  .join(" · ");
 
-                  <div className="verified-deployments">
-                    {asset.deployments.map((deployment) => (
-                      <div className="verified-deployment-item" key={`${deployment.assetKey}-${deployment.chainId}`}>
-                        <div className="verified-deployment-top">
-                          <strong>{chainName(deployment.chainId)} ({deployment.chainId})</strong>
-                          <span className="badge neutral">{deployment.tokenStandard}</span>
-                        </div>
-                        <div className="verified-deployment-grid">
-                          <span className="mono">contract: {deployment.tokenAddress}</span>
-                          <span>tokenId: {deployment.tokenId}</span>
-                          <span>kybReq: #{deployment.kybRequestId}</span>
-                          <span>verified: {formatUnixTimestamp(deployment.verifiedAt)}</span>
-                          <span className="mono">assetKey: {deployment.assetKey}</span>
-                          <span className="mono">verifyTx: {deployment.verifyTxHash || "-"}</span>
-                          <span>block: {deployment.verifyBlockNumber ?? "-"}</span>
-                        </div>
-                      </div>
-                    ))}
+                return (
+                <article className="verified-card" key={asset.groupId}>
+                  <div className="verified-card-media">
+                    {previewImageUrl ? (
+                      <img
+                        src={previewImageUrl}
+                        alt={cardTitle || "Asset preview"}
+                        loading="lazy"
+                        data-fallback-urls={imageHttpFallbackUrls.join("\n")}
+                        data-fallback-index="0"
+                        onError={handleVerifiedAssetImageError}
+                      />
+                    ) : (
+                      <div className="verified-card-media-placeholder">No preview</div>
+                    )}
+                  </div>
+
+                  <div className="verified-card-body">
+                  <div className="verified-card-head">
+                    <div className="verified-card-head-copy">
+                      <strong>{cardTitle}</strong>
+                      {cardDescription ? <p className="verified-card-subtitle">{cardDescription}</p> : null}
+                    </div>
+                    <span className="badge ok">Verified</span>
+                  </div>
+
+                  <div className="verified-chip-row">
+                    {asset.deployments.map((deployment) => {
+                      const chainLabel = chainName(deployment.chainId);
+                      const explorerUrl = contractExplorerUrl(deployment.chainId, deployment.tokenAddress);
+                      const key = `${asset.groupId}-${deployment.chainId}-${deployment.assetKey}`;
+                      const tooltipContent = (
+                        <span className="verified-network-tooltip" role="tooltip">
+                          <span className="verified-network-tooltip-title">{chainLabel} ({deployment.chainId})</span>
+                          <span className="verified-network-tooltip-grid">
+                            <span>Type</span>
+                            <strong>{deployment.tokenStandard}</strong>
+                            <span>Contract</span>
+                            <strong className="mono" title={deployment.tokenAddress}>{deployment.tokenAddress}</strong>
+                            <span>Token ID</span>
+                            <strong>{deployment.tokenId}</strong>
+                            <span>KYB Req</span>
+                            <strong>#{deployment.kybRequestId}</strong>
+                            <span>Verified</span>
+                            <strong>{formatUnixTimestamp(deployment.verifiedAt)}</strong>
+                          </span>
+                        </span>
+                      );
+
+                      if (explorerUrl) {
+                        return (
+                          <span className="verified-network-pill-wrap" key={key}>
+                            <a
+                              className="pill ok verified-network-pill"
+                              href={explorerUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              aria-label={`${chainLabel} contract`}
+                            >
+                              {chainLabel}
+                            </a>
+                            {tooltipContent}
+                          </span>
+                        );
+                      }
+
+                      return (
+                        <span className="verified-network-pill-wrap" key={key}>
+                          <span className="pill ok verified-network-pill" tabIndex={0}>
+                            {chainLabel}
+                          </span>
+                          {tooltipContent}
+                        </span>
+                      );
+                    })}
+                  </div>
+
+                  <div className="verified-card-stats">
+                    <div className="verified-card-stat">
+                      <span>Publisher</span>
+                      <strong className="mono" title={asset.owner}>{shortAddress(asset.owner)}</strong>
+                    </div>
+                    <div className="verified-card-stat">
+                      <span>Company</span>
+                      <strong title={companyMeta ? `${companyName} · ${companyMeta}` : companyName}>{companyName}</strong>
+                    </div>
+                    <div className="verified-card-stat">
+                      <span>Last verified</span>
+                      <strong>{formatUnixTimestamp(asset.latestVerifiedAt)}</strong>
+                    </div>
+                  </div>
+
+                  {companyMeta ? <div className="verified-card-submeta">{companyMeta}</div> : null}
+
+                  <div className="verified-card-links">
+                    {metadataHttpUrl ? (
+                      <a
+                        className="verified-card-link"
+                        href={metadataHttpUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={asset.metadataHash ? `metadataHash: ${asset.metadataHash}` : undefined}
+                      >
+                        Open metadata
+                      </a>
+                    ) : null}
+                    {imageHttpUrl ? (
+                      <a className="verified-card-link" href={imageHttpUrl} target="_blank" rel="noreferrer">
+                        Open image
+                      </a>
+                    ) : null}
+                    {companySiteUrl ? (
+                      <a className="verified-card-link" href={companySiteUrl} target="_blank" rel="noreferrer">
+                        Company site
+                      </a>
+                    ) : null}
+                    {metadataPreview?.status === "loading" ? <span className="verified-card-meta-status">Loading IPFS metadata…</span> : null}
+                    {metadataPreview?.status === "error" ? <span className="verified-card-meta-status">Metadata unavailable</span> : null}
+                  </div>
+
+                  <div className="verified-card-actions">
+                    <span className={`pill ${buyerVerificationRequirementBadgeClass(buyerRequirement)} verified-buy-pill`}>
+                      Buy access: {buyerRequirementLabel}
+                    </span>
+                    <button
+                      className="btn primary verified-buy-btn"
+                      type="button"
+                      disabled={busy || !canBuy}
+                      title={buyButtonTitle}
+                      onClick={() => setStatus(`Buy flow stub for "${cardTitle || asset.name}" is not implemented yet.`)}
+                    >
+                      Buy
+                    </button>
+                  </div>
                   </div>
                 </article>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
+        ) : null}
       </section>
-
-      <footer className="status-bar card">
-        <span className="status-label">Status</span>
-        <span className="status-value">{status}</span>
-      </footer>
-
-      {error ? (
-        <div className="toast toast-error" role="alert">
-          {error}
-        </div>
       ) : null}
+
+      <section className="status-log card" aria-label="Status log">
+        <div className="status-log-head">
+          <span className="status-label">Status Log</span>
+          <span className="status-value">{status}</span>
+        </div>
+        <div
+          ref={statusLogRef}
+          className="status-log-list"
+          role="log"
+          aria-live="polite"
+          aria-relevant="additions text"
+        >
+          {statusHistory.map((entry) => (
+            <div key={entry.id} className={`status-log-entry ${entry.level === "error" ? "error" : ""}`}>
+              <span className="status-log-time">[{entry.timestamp}]</span>
+              <span className="status-log-message">{entry.message}</span>
+            </div>
+          ))}
+        </div>
+      </section>
 
       {globalBusy ? (
         <div className="loading-backdrop">

@@ -32,5 +32,6 @@ export const env = {
   worldIdAction: optionalEnv("VITE_WORLD_ID_ACTION"),
   worldIdVerificationLevel: optionalEnv("VITE_WORLD_ID_VERIFICATION_LEVEL") || "device",
   worldIdPrecheckMode: optionalEnv("VITE_WORLD_ID_PRECHECK_MODE") || "strict",
-  worldIdFlag: BigInt(parseNumber(import.meta.env.VITE_WORLD_ID_FLAG ?? "2", 2))
+  worldIdFlag: BigInt(parseNumber(import.meta.env.VITE_WORLD_ID_FLAG ?? "2", 2)),
+  pinataJwt: optionalEnv("VITE_PINATA_JWT")
 };
