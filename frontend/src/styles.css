@@ -1,4 +1,44 @@
-@import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&family=Google+Sans+Code:wght@400;500;700&display=swap");
+
+@font-face {
+  font-family: "Google Sans";
+  src: local("Google Sans"), local("GoogleSans-Regular"), local("Product Sans Regular"), local("Product Sans");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Google Sans";
+  src: local("Google Sans Medium"), local("GoogleSans-Medium"), local("Product Sans Medium");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Google Sans";
+  src: local("Google Sans Bold"), local("GoogleSans-Bold"), local("Product Sans Bold");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Google Sans Code";
+  src: local("Google Sans Code"), local("Google Sans Mono"), local("GoogleSansCode-Regular");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Google Sans Code";
+  src: local("Google Sans Code Medium"), local("GoogleSansCode-Medium"), local("Google Sans Mono Medium");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
   --bg: #f6f7fb;
@@ -28,8 +68,15 @@ body {
   margin: 0;
   min-height: 100vh;
   color: var(--ink);
-  font-family: "Google Sans", "Google Sans Text", "Product Sans", "Sora", sans-serif;
+  font-family: "Google Sans", "Google Sans Text", "Product Sans", "Manrope", "Roboto", sans-serif;
   background: #ffffff;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
 }
 
 body.page-theme-light {
@@ -1515,6 +1562,15 @@ a.verified-network-pill:hover {
   padding: 0.9rem 1rem;
 }
 
+.status-log.card {
+  background: rgba(255, 255, 255, 0.34);
+  border-color: rgba(217, 223, 236, 0.44);
+  box-shadow: 0 14px 28px rgba(32, 45, 86, 0.05);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  opacity: 0.55;
+}
+
 .status-log-head {
   display: flex;
   align-items: center;
@@ -1531,15 +1587,19 @@ a.verified-network-pill:hover {
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: #fbfcff;
+  background: rgba(251, 252, 255, 0.18);
+  border-color: rgba(217, 223, 236, 0.34);
   padding: 0.65rem 0.7rem;
   display: grid;
   gap: 0.18rem;
+  font-family: "Google Sans Code", "Google Sans Mono", "JetBrains Mono", "Roboto Mono", monospace;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
 .status-log-entry {
   color: #2b3553;
-  font: 500 0.76rem/1.45 "JetBrains Mono", monospace;
+  font: 500 0.76rem/1.45 "Google Sans Code", "Google Sans Mono", "JetBrains Mono", "Roboto Mono", monospace;
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 0.45rem;
