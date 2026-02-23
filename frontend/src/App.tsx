@@ -865,6 +865,23 @@ function compactSvg(svg: string): string {
   return svg.replace(/>\s+</g, "><").replace(/\s{2,}/g, " ").trim();
 }
 
+function assertValidSvgXml(svg: string): void {
+  if (typeof DOMParser === "undefined") {
+    return;
+  }
+
+  const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
+  const parserError = doc.querySelector("parsererror");
+  if (parserError) {
+    throw new Error(`Generated SVG XML is invalid: ${parserError.textContent?.trim() || "parsererror"}`);
+  }
+
+  const rootName = doc.documentElement?.nodeName?.toLowerCase?.() ?? "";
+  if (rootName !== "svg") {
+    throw new Error("Generated SVG root element is not <svg>");
+  }
+}
+
 function svgSnippet(value: string, maxChars: number): string {
   const normalized = value.trim().replace(/\s+/g, " ");
   if (!normalized) {
@@ -3116,6 +3133,7 @@ export default function App() {
 
       setStatus("Generating asset preview image...");
       const imageSvg = compactSvg(buildGeneratedAssetPreviewSvg(preset, generatedAt));
+      assertValidSvgXml(imageSvg);
       const imageBlob = new Blob([imageSvg], { type: "image/svg+xml" });
 
       setStatus("Uploading generated image to Pinata...");
@@ -4293,8 +4311,14 @@ export default function App() {
                         Open metadata
                       </a>
                     ) : null}
-                    {imageHttpUrl ? (
-                      <a className="verified-card-link" href={imageHttpUrl} target="_blank" rel="noreferrer">
+                    {previewImageUrl ? (
+                      <a
+                        className="verified-card-link"
+                        href={previewImageUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={inlineImageDataUrl ? "Opens inline SVG preview from metadata.image_data" : undefined}
+                      >
                         Open image
                       </a>
                     ) : null}
