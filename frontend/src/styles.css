@@ -2528,10 +2528,10 @@ body.page-theme-light .verified-network-pill-wrap:focus-within {
 }
 
 body.page-theme-light .verified-network-tooltip {
-  left: 50%;
+  left: 0;
   z-index: 24;
   width: min(24rem, calc(100vw - 2rem));
-  transform: translate(-50%, -4px);
+  transform: translateY(-4px);
   background: rgba(2, 6, 23, 0.95);
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.42);
@@ -2548,7 +2548,7 @@ body.page-theme-light .verified-network-tooltip::before {
 
 body.page-theme-light .verified-network-pill-wrap:hover .verified-network-tooltip,
 body.page-theme-light .verified-network-pill-wrap:focus-within .verified-network-tooltip {
-  transform: translate(-50%, 0);
+  transform: translateY(0);
 }
 
 body.page-theme-light .verified-network-tooltip-title {
