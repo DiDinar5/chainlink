@@ -60,6 +60,7 @@ type TokenStandard = "ERC20" | "ERC721" | "ERC1155";
 type BuyerVerificationRequirement = "open" | "kyc" | "worldid" | "kyc_worldid";
 
 type AppTab = "assets" | "personal" | "business";
+type UiTheme = "light" | "dark";
 
 type NetworkOption = {
   chainId: number;
@@ -1531,6 +1532,17 @@ export default function App() {
   const [refreshingAssets, setRefreshingAssets] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<AppTab>("assets");
   const [assetsViewMode, setAssetsViewMode] = useState<AssetsViewMode>("all");
+  const [uiTheme, setUiTheme] = useState<UiTheme>(() => {
+    if (typeof window === "undefined") {
+      return "dark";
+    }
+    try {
+      const stored = window.localStorage.getItem("vam-ui-theme");
+      return stored === "light" ? "light" : "dark";
+    } catch {
+      return "dark";
+    }
+  });
 
   const { open } = useAppKit();
   const { address: appKitAddress, isConnected: isAppKitConnected } = useAppKitAccount({ namespace: "eip155" });
@@ -1620,13 +1632,30 @@ export default function App() {
   }, [statusHistory]);
 
   useEffect(() => {
-    const lightClass = "page-theme-light";
-    document.body.classList.add(lightClass);
+    const darkThemeClass = "theme-dark";
+    const lightThemeClass = "theme-light";
+    const legacyDarkThemeClass = "page-theme-light";
+    document.body.classList.toggle(darkThemeClass, uiTheme === "dark");
+    document.body.classList.toggle(lightThemeClass, uiTheme === "light");
+    document.body.classList.remove(legacyDarkThemeClass);
 
     return () => {
-      document.body.classList.remove(lightClass);
+      document.body.classList.remove(darkThemeClass);
+      document.body.classList.remove(lightThemeClass);
+      document.body.classList.remove(legacyDarkThemeClass);
     };
-  }, []);
+  }, [uiTheme]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      window.localStorage.setItem("vam-ui-theme", uiTheme);
+    } catch {
+      // Ignore storage failures in dev/local environments.
+    }
+  }, [uiTheme]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3538,6 +3567,7 @@ export default function App() {
 
   const globalBusy = busy || waitingPacket || refreshingStatus || syncWaiting;
   const progressCopy = getProgressCopy(status, waitingPacket, refreshingStatus, syncWaiting);
+  const isDarkTheme = uiTheme === "dark";
   const assetsReadProvider = publicReadProvider ?? provider ?? null;
   const wantsMineAssets = assetsViewMode === "mine" && Boolean(account);
   const canReadPublicAssets = Boolean(assetsReadProvider);
@@ -3556,13 +3586,31 @@ export default function App() {
   return (
     <div className="flow-page">
       <header className="hero-card">
-        <div>
+        <div className="hero-copy">
           <h1>Verified Asset Market</h1>
           <p className="hero-text">
             One place to manage cross-chain assets that require KYC, World ID, or KYB verification.
           </p>
         </div>
         <div className="hero-actions">
+          <button
+            className={`theme-toggle-btn${isDarkTheme ? " is-dark" : ""}`}
+            type="button"
+            onClick={() => setUiTheme((previous) => (previous === "dark" ? "light" : "dark"))}
+            aria-pressed={isDarkTheme}
+            title={`Switch to ${isDarkTheme ? "light" : "dark"} theme`}
+          >
+            <span className="theme-toggle-track" aria-hidden="true">
+              <span className="theme-toggle-thumb" />
+            </span>
+            <span className="theme-toggle-text">{isDarkTheme ? "Dark" : "Light"}</span>
+          </button>
+          <button className="btn" onClick={() => void refreshStatusWithRetry()} disabled={busy || !account || networkMismatch}>
+            Check status
+          </button>
+          <button className="btn primary" onClick={connectWallet} disabled={busy}>
+            {walletButtonLabel}
+          </button>
           <div className="hero-verify-pills" aria-label="Verification summary">
             <span className={`pill hero-verify-pill ${kycQuickBadgeClass}`}>
               <span className="hero-verify-pill-label">KYC: {kycQuickLabel}</span>
@@ -3577,12 +3625,6 @@ export default function App() {
               <span className="hero-verify-pill-exp">Exp: {kybQuickExpLabel}</span>
             </span>
           </div>
-          <button className="btn primary" onClick={connectWallet} disabled={busy}>
-            {walletButtonLabel}
-          </button>
-          <button className="btn" onClick={() => void refreshStatusWithRetry()} disabled={busy || !account || networkMismatch}>
-            Check status
-          </button>
         </div>
       </header>
 
@@ -3616,6 +3658,10 @@ export default function App() {
       </section>
 
       {activeTab === "personal" || activeTab === "business" ? (
+      <section className="tab-section-group" aria-label={activeTab === "personal" ? "Personal verifications" : "Business verification"}>
+      <div className="queue-head tab-section-head">
+        <h3>{activeTab === "personal" ? "Personal Verifications" : "Business Verification"}</h3>
+      </div>
       <section className="grid two">
         {activeTab === "personal" ? (
         <article className="card wallet-card">
@@ -3829,6 +3875,7 @@ export default function App() {
           </div>
         </article>
         ) : null}
+      </section>
       </section>
       ) : null}
 
