@@ -59,7 +59,7 @@ type KybStubStatus = "not_started" | "in_review" | "verified";
 type TokenStandard = "ERC20" | "ERC721" | "ERC1155";
 type BuyerVerificationRequirement = "open" | "kyc" | "worldid" | "kyc_worldid";
 
-type AppTab = "assets" | "personal" | "business" | "integrations";
+type AppTab = "assets" | "personal" | "business" | "checkers" | "integrations";
 type UiTheme = "light" | "dark";
 
 type NetworkOption = {
@@ -3588,40 +3588,45 @@ export default function App() {
   const integrationRegistryNetworkLabel = `${chainName(env.chainId)} (${env.chainId})`;
   const integrationVerificationRegistryContractLabel = env.passRegistry || "-";
   const integrationAssetRegistryContractLabel = env.assetRegistry || "-";
+  const integrationQuickPoints = [
+    "No API key required",
+    "Read-only calls (`eth_call`) — no gas",
+    "Works from any frontend or backend with RPC access"
+  ] as const;
   const integrationMethodGuide = [
     {
       key: "user",
       step: "1",
-      title: "Check user verifications",
+      title: "Check a user",
       input: "wallet address",
       methods: [
         "verifyUser(address user, uint256 policyId)",
         "attestations(address user)",
         "verificationExpirations(address user)"
       ],
-      note: "Aggregate these reads into KYC / World ID / KYB status."
+      note: "Returns user verification status (KYC / World ID / KYB) with expirations."
     },
     {
       key: "asset",
       step: "2",
-      title: "Check asset by contract",
-      input: "chainId + tokenAddress (+ tokenId for NFT)",
+      title: "Check one asset",
+      input: "source chain + token contract (+ tokenId for NFT / 1155)",
       methods: [
         "computeAssetKey(uint256 sourceChainId, address tokenAddress, uint256 tokenId, uint8 tokenStandard)",
         "assets(bytes32 assetKey)"
       ],
-      note: "Compute deterministic assetKey, then read the canonical asset record from the registry."
+      note: "Returns the canonical registry record for that asset (if it exists and is not revoked)."
     },
     {
       key: "list",
       step: "3",
-      title: "List all verified assets",
+      title: "Get all verified assets",
       input: "block range (read logs) + assetKey",
       methods: [
         "AssetVerified(...) event logs",
         "assets(bytes32 assetKey)"
       ],
-      note: "Read AssetVerified events to collect asset keys, then hydrate each key with assets(assetKey)."
+      note: "Collect asset keys from events, then load each asset record from the registry."
     }
   ] as const;
 
@@ -4066,6 +4071,14 @@ export default function App() {
             <span>Business</span>
           </button>
           <button
+            className={`section-tab ${activeTab === "checkers" ? "active" : ""}`}
+            onClick={() => setActiveTab("checkers")}
+            aria-pressed={activeTab === "checkers"}
+            type="button"
+          >
+            <span>Checkers</span>
+          </button>
+          <button
             className={`section-tab ${activeTab === "integrations" ? "active" : ""}`}
             onClick={() => setActiveTab("integrations")}
             aria-pressed={activeTab === "integrations"}
@@ -4076,45 +4089,58 @@ export default function App() {
         </div>
       </section>
 
-      {activeTab === "integrations" ? (
-      <section className="tab-section-group integrations-wrap" aria-label="Integrations">
+      {activeTab === "integrations" || activeTab === "checkers" ? (
+      <section
+        className="tab-section-group integrations-wrap"
+        aria-label={activeTab === "integrations" ? "Integrations" : "Checkers"}
+      >
         <div className="queue-head">
-          <h3>Integrations</h3>
-          <span className="badge neutral">No API key</span>
+          <h3>{activeTab === "integrations" ? "Integrations" : "Checkers"}</h3>
+          <div className="queue-actions">
+            <span className="badge neutral">No API key</span>
+            {activeTab === "integrations" ? <span className="badge ok">Onchain</span> : null}
+          </div>
         </div>
-        <p className="card-text integrations-intro">
-          Public on-chain reads for user verification status, asset lookup, and verified asset directory listing.
-        </p>
+        {activeTab === "checkers" ? (
+          <p className="card-text integrations-intro">
+            Interactive on-chain checkers for user verifications, asset lookup, and verified asset directory listing.
+          </p>
+        ) : null}
 
-        <div className="integrations-grid">
-          <article className="card integrations-card integrations-card-wide">
-            <div className="card-head">
-              <h2>Public Contract Read Methods</h2>
-              <span className="badge ok">Onchain</span>
-            </div>
-            <p className="card-text">
-              No API keys: any marketplace can use public reads in 3 steps.
+        <div className={`integrations-grid${activeTab === "checkers" ? " checkers-grid" : ""}`}>
+          {activeTab === "integrations" ? (
+          <article className="card integrations-card integrations-card-wide integrations-card-plain">
+            <p className="card-text integration-plain-intro">
+              Simple on-chain reads for marketplaces that want to display and validate verified assets. Use these public
+              reads to check a user, resolve an asset, and list verified assets.
             </p>
+            <ul className="integration-quick-points" aria-label="Integration basics">
+              {integrationQuickPoints.map((point) => (
+                <li key={point}>{point}</li>
+              ))}
+            </ul>
+            <div className="integration-section-label">Read targets</div>
             <div className="integration-method-target" aria-label="Registry read target">
               <div className="integration-method-target-grid">
-                <div className="integration-method-target-item">
-                  <span>PassRegistry (user verifications)</span>
-                  <code>{integrationVerificationRegistryContractLabel}</code>
-                </div>
-                <div className="integration-method-target-item">
-                  <span>AssetRegistry (assets directory)</span>
-                  <code>{integrationAssetRegistryContractLabel}</code>
-                </div>
                 <div className="integration-method-target-item">
                   <span>Network</span>
                   <code>{integrationRegistryNetworkLabel}</code>
                 </div>
+                <div className="integration-method-target-item">
+                  <span>Verification Registry (PassRegistry)</span>
+                  <code>{integrationVerificationRegistryContractLabel}</code>
+                </div>
+                <div className="integration-method-target-item">
+                  <span>Asset Registry</span>
+                  <code>{integrationAssetRegistryContractLabel}</code>
+                </div>
               </div>
               <p className="hint integration-method-target-note">
-                All calls below are read-only (`eth_call`) and do not spend gas. RPC providers may still apply rate
+                All calls below are read-only (`eth_call`) and free to execute. Your RPC provider may still apply rate
                 limits.
               </p>
             </div>
+            <div className="integration-section-label">Common read flows</div>
             <div className="integration-method-groups" aria-label="Integration method groups">
               {integrationMethodGuide.map((group) => (
                 <section className="integration-method-group" key={group.key}>
@@ -4139,7 +4165,9 @@ export default function App() {
               ))}
             </div>
           </article>
+          ) : null}
 
+          {activeTab === "checkers" ? (
           <article className="card integrations-card">
             <div className="card-head">
               <h2>Check User Verifications</h2>
@@ -4173,7 +4201,9 @@ export default function App() {
               <p className="hint">Enter a wallet address and click `Check`.</p>
             )}
           </article>
+          ) : null}
 
+          {activeTab === "checkers" ? (
           <article className="card integrations-card">
             <div className="card-head">
               <h2>Check Asset</h2>
@@ -4245,10 +4275,12 @@ export default function App() {
               <p className="hint">Select a source network and contract, then click `Check`.</p>
             )}
           </article>
+          ) : null}
 
+          {activeTab === "checkers" ? (
           <article className="card integrations-card integrations-card-wide">
             <div className="queue-head">
-              <h3>All Assets (Directory Preview)</h3>
+              <h3>All Assets</h3>
               <div className="queue-actions">
                 <span className={`badge ${integrationAssetsRequested && integrationAssetsCount > 0 ? "ok" : "neutral"}`}>
                   {integrationAssetsRequested ? integrationAssetsCount : "-"}
@@ -4282,6 +4314,7 @@ export default function App() {
               <p className="empty-state">No verified assets loaded yet. Click `Refresh` to re-query the public registry.</p>
             )}
           </article>
+          ) : null}
         </div>
       </section>
       ) : null}

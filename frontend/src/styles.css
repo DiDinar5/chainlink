@@ -1357,10 +1357,61 @@ textarea {
   align-items: start;
 }
 
+.integrations-grid.checkers-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.integrations-grid.checkers-grid .integrations-card-wide {
+  grid-column: auto;
+}
+
+.integrations-grid.checkers-grid .card-head,
+.integrations-grid.checkers-grid .queue-head {
+  align-items: flex-start;
+  margin-bottom: 0.85rem;
+}
+
+.integrations-grid.checkers-grid .card-head h2,
+.integrations-grid.checkers-grid .queue-head h3 {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.2;
+}
+
+.integrations-grid.checkers-grid .queue-actions {
+  align-self: flex-start;
+}
+
 .integrations-card {
   padding: 0.9rem 1rem;
   display: grid;
   gap: 0.55rem;
+}
+
+.integrations-card-plain {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+  gap: 0.8rem;
+}
+
+.integrations-card-plain .card-head {
+  margin-bottom: 0;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.integrations-card-plain .card-text {
+  margin: 0;
+  max-width: 68ch;
+}
+
+.integrations-card-plain .card-head h2 {
+  font-size: 1.08rem;
+  line-height: 1.15;
 }
 
 .integrations-card .card-head {
@@ -1522,6 +1573,121 @@ textarea {
   margin: 0;
   font-size: 0.68rem;
   line-height: 1.28;
+}
+
+.integration-plain-intro {
+  font-size: 0.92rem;
+  line-height: 1.38;
+}
+
+.integration-quick-points {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.32rem;
+}
+
+.integration-quick-points li {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.8rem;
+  line-height: 1.3;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.38rem;
+}
+
+.integration-quick-points li::before {
+  content: "";
+  width: 0.32rem;
+  height: 0.32rem;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.95);
+  margin-top: 0.34rem;
+  flex: 0 0 auto;
+}
+
+.integration-section-label {
+  color: var(--ink-soft);
+  font-size: 0.68rem;
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.integrations-card-plain .integration-method-target {
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+  gap: 0.55rem;
+}
+
+.integrations-card-plain .integration-method-target-grid {
+  gap: 0.55rem;
+}
+
+.integrations-card-plain .integration-method-target-item {
+  gap: 0.22rem;
+}
+
+.integrations-card-plain .integration-method-target-item > span {
+  font-size: 0.67rem;
+  font-weight: 700;
+}
+
+.integrations-card-plain .integration-method-target-item > code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: 0.73rem;
+  line-height: 1.26;
+}
+
+.integrations-card-plain .integration-method-target-note {
+  padding-top: 0.45rem;
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+  font-size: 0.72rem;
+  line-height: 1.32;
+}
+
+.integrations-card-plain .integration-method-groups {
+  gap: 0.8rem;
+}
+
+.integrations-card-plain .integration-method-group {
+  background: transparent;
+  border-radius: 12px;
+  padding: 0.7rem 0.75rem;
+}
+
+.integrations-card-plain .integration-method-group-head strong {
+  font-size: 0.9rem;
+  line-height: 1.18;
+}
+
+.integrations-card-plain .integration-method-input {
+  margin-top: 0.16rem;
+  font-size: 0.71rem;
+  line-height: 1.25;
+}
+
+.integrations-card-plain .integration-method-list-compact code {
+  font-size: 0.72rem;
+  line-height: 1.32;
+}
+
+.integrations-card-plain .integration-method-list li {
+  background: transparent;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.integrations-card-plain .integration-method-note {
+  color: var(--ink-soft);
+  font-size: 0.74rem;
+  line-height: 1.34;
 }
 
 .integration-input-row {
@@ -2501,6 +2667,20 @@ body .card.registry-card-assets:hover {
   box-shadow: none;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
+}
+
+body .card.integrations-card-plain,
+body .card.integrations-card-plain:hover {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+body .integrations-card-plain .card-head {
+  border-bottom: 0;
+  padding-bottom: 0;
 }
 
 body .section-tabs-card {
