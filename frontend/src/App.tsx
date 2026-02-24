@@ -1533,10 +1533,17 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<AppTab>("assets");
   const [assetsViewMode, setAssetsViewMode] = useState<AssetsViewMode>("all");
   const [integrationUserQuery, setIntegrationUserQuery] = useState<string>("");
-  const [integrationUserLookup, setIntegrationUserLookup] = useState<string>("");
-  const [integrationAssetQuery, setIntegrationAssetQuery] = useState<string>("");
-  const [integrationAssetLookup, setIntegrationAssetLookup] = useState<string>("");
+  const [integrationUserChecking, setIntegrationUserChecking] = useState<boolean>(false);
+  const [integrationUserResponse, setIntegrationUserResponse] = useState<unknown | null>(null);
+  const [integrationAssetChainId, setIntegrationAssetChainId] = useState<string>("11155111");
+  const [integrationAssetTokenAddress, setIntegrationAssetTokenAddress] = useState<string>("");
+  const [integrationAssetTokenStandard, setIntegrationAssetTokenStandard] = useState<TokenStandard>("ERC721");
+  const [integrationAssetTokenId, setIntegrationAssetTokenId] = useState<string>("1");
+  const [integrationAssetChecking, setIntegrationAssetChecking] = useState<boolean>(false);
+  const [integrationAssetResponse, setIntegrationAssetResponse] = useState<unknown | null>(null);
   const [integrationAssetsRequested, setIntegrationAssetsRequested] = useState<boolean>(false);
+  const [integrationAssetsLoading, setIntegrationAssetsLoading] = useState<boolean>(false);
+  const [integrationAssetsResponse, setIntegrationAssetsResponse] = useState<unknown | null>(null);
   const [uiTheme, setUiTheme] = useState<UiTheme>(() => {
     if (typeof window === "undefined") {
       return "dark";
@@ -3579,7 +3586,8 @@ export default function App() {
   const canReadMineAssets = Boolean(assetsReadProvider && account);
   const canReadCurrentAssetsView = wantsMineAssets ? canReadMineAssets : canReadPublicAssets;
   const integrationRegistryNetworkLabel = `${chainName(env.chainId)} (${env.chainId})`;
-  const integrationRegistryContractLabel = env.passRegistry || "-";
+  const integrationVerificationRegistryContractLabel = env.passRegistry || "-";
+  const integrationAssetRegistryContractLabel = env.assetRegistry || "-";
   const integrationMethodGuide = [
     {
       key: "user",
@@ -3599,169 +3607,54 @@ export default function App() {
       title: "Check asset by contract",
       input: "chainId + tokenAddress (+ tokenId for NFT)",
       methods: [
-        "resolveAssetByToken(chainId, tokenAddress, tokenStandard, tokenId)",
-        "getAssetCore(uint256 assetId)",
-        "getAssetDeploymentCount(uint256 assetId)",
-        "getAssetDeployment(uint256 assetId, uint256 index)"
+        "computeAssetKey(uint256 sourceChainId, address tokenAddress, uint256 tokenId, uint8 tokenStandard)",
+        "assets(bytes32 assetKey)"
       ],
-      note: "Resolve contract -> assetId, then fetch canonical asset details."
+      note: "Compute deterministic assetKey, then read the canonical asset record from the registry."
     },
     {
       key: "list",
       step: "3",
       title: "List all verified assets",
-      input: "offset + limit",
+      input: "block range (read logs) + assetKey",
       methods: [
-        "getVerifiedAssetIds(uint256 offset, uint256 limit)",
-        "getAssetCore(uint256 assetId)",
-        "getAssetDeploymentCount(uint256 assetId)",
-        "getAssetDeployment(uint256 assetId, uint256 index)"
+        "AssetVerified(...) event logs",
+        "assets(bytes32 assetKey)"
       ],
-      note: "Use pagination and hydrate asset details in batches."
+      note: "Read AssetVerified events to collect asset keys, then hydrate each key with assets(assetKey)."
     }
   ] as const;
 
-  const integrationUserLookupValue = integrationUserLookup.trim();
+  const integrationReadProvider = assetsReadProvider;
+  const integrationUserQueryValue = integrationUserQuery.trim();
   const integrationUserAddressValid =
-    integrationUserLookupValue.length > 0 ? ethers.isAddress(integrationUserLookupValue) : false;
-  const integrationUserMatchesConnected =
-    Boolean(
-      account &&
-        integrationUserAddressValid &&
-        account.toLowerCase() === integrationUserLookupValue.toLowerCase()
-    );
-  const integrationUserCheckResponse = !integrationUserLookupValue
-    ? null
-    : !integrationUserAddressValid
-      ? {
-          ok: false,
-          error: "INVALID_ADDRESS",
-          wallet: integrationUserLookupValue,
-          message: "Enter a valid EVM wallet address."
-        }
-      : integrationUserMatchesConnected
-        ? {
-            ok: true,
-            source: "local-session-demo",
-            wallet: integrationUserLookupValue,
-            knownWallet: true,
-            verifications: {
-              kyc: { status: kycQuickLabel.toLowerCase(), expiresAt: kycQuickExpLabel },
-              worldId: { status: worldIdQuickLabel.toLowerCase(), expiresAt: worldIdQuickExpLabel },
-              kyb: { status: kybQuickLabel.toLowerCase(), expiresAt: kybQuickExpLabel }
-            },
-            flags: {
-              hasKycFlag,
-              hasWorldIdFlag,
-              hasKybFlag,
-              hasActiveWorldIdFlag,
-              hasActiveKybFlag
-            }
-          }
-        : {
-            ok: true,
-            source: "local-session-demo",
-            wallet: integrationUserLookupValue,
-            knownWallet: false,
-            message: "This demo only exposes full verification state for the currently connected wallet.",
-            verifications: {
-              kyc: { status: "unknown", expiresAt: "-" },
-              worldId: { status: "unknown", expiresAt: "-" },
-              kyb: { status: "unknown", expiresAt: "-" }
-            }
-          };
+    integrationUserQueryValue.length > 0 ? ethers.isAddress(integrationUserQueryValue) : false;
 
-  const integrationAssetLookupValue = integrationAssetLookup.trim();
-  const integrationAssetLookupNormalized = integrationAssetLookupValue.toLowerCase();
-  const integrationAssetMatch = integrationAssetLookupNormalized
-    ? verifiedAssets.find((asset) => {
-        if (asset.groupId.toLowerCase().includes(integrationAssetLookupNormalized)) {
-          return true;
-        }
-        if (asset.name.toLowerCase().includes(integrationAssetLookupNormalized)) {
-          return true;
-        }
-        if (asset.metadataUri.toLowerCase().includes(integrationAssetLookupNormalized)) {
-          return true;
-        }
-        if (asset.owner.toLowerCase() === integrationAssetLookupNormalized) {
-          return true;
-        }
-        return asset.deployments.some((deployment) => {
-          return (
-            deployment.tokenAddress.toLowerCase() === integrationAssetLookupNormalized ||
-            `${deployment.chainId}` === integrationAssetLookupNormalized
-          );
-        });
-      })
-    : null;
-  const integrationAssetMetadata = integrationAssetMatch
-    ? resolvedAssetMetadataByUri[integrationAssetMatch.metadataUri]
-    : undefined;
-  const integrationAssetRequirement: BuyerVerificationRequirement =
-    integrationAssetMetadata?.buyerVerificationRequirement || integrationAssetMatch?.buyerVerificationRequirement || "open";
-  const integrationAssetCheckResponse = !integrationAssetLookupValue
-    ? null
-    : integrationAssetMatch
-      ? {
-          ok: true,
-          assetKey: integrationAssetMatch.groupId,
-          status: "verified",
-          name: integrationAssetMetadata?.name || integrationAssetMatch.name,
-          publisher: integrationAssetMatch.owner,
-          metadataUri: integrationAssetMatch.metadataUri,
-          metadataHash: integrationAssetMatch.metadataHash,
-          company: integrationAssetMetadata?.companyLegalName || integrationAssetMatch.companyLegalName || "-",
-          verificationRequirement: buyerVerificationRequirementLabel(integrationAssetRequirement),
-          deployments: integrationAssetMatch.deployments.map((deployment) => ({
-            chainId: deployment.chainId,
-            chainName: chainName(deployment.chainId),
-            tokenStandard: deployment.tokenStandard,
-            tokenAddress: deployment.tokenAddress,
-            tokenId: deployment.tokenId,
-            kybRequestId: deployment.kybRequestId,
-            verifiedAt: formatUnixTimestamp(deployment.verifiedAt)
-          }))
-        }
-      : {
-          ok: false,
-          error: "ASSET_NOT_FOUND",
-          query: integrationAssetLookupValue,
-          message: "No matching verified asset found in the current local directory snapshot."
-        };
-  const integrationAssetsDirectoryResponse = {
-    ok: true,
-    scope: "public",
-    count: verifiedAssets.length,
-    assets: verifiedAssets.map((asset) => {
-      const metadataPreview = resolvedAssetMetadataByUri[asset.metadataUri];
-      const requirement: BuyerVerificationRequirement =
-        metadataPreview?.buyerVerificationRequirement || asset.buyerVerificationRequirement || "open";
-      return {
-        assetKey: asset.groupId,
-        status: "verified",
-        name: metadataPreview?.name || asset.name,
-        publisher: asset.owner,
-        publisherShort: shortAddress(asset.owner),
-        company: metadataPreview?.companyLegalName || asset.companyLegalName || null,
-        metadataUri: asset.metadataUri,
-        metadataHash: asset.metadataHash,
-        verificationRequirement: buyerVerificationRequirementLabel(requirement),
-        lastVerifiedAt: asset.latestVerifiedAt,
-        lastVerifiedAtLabel: formatUnixTimestamp(asset.latestVerifiedAt),
-        deployments: asset.deployments.map((deployment) => ({
-          chainId: deployment.chainId,
-          chainName: chainName(deployment.chainId),
-          tokenStandard: deployment.tokenStandard,
-          tokenAddress: deployment.tokenAddress,
-          tokenId: deployment.tokenId,
-          kybRequestId: deployment.kybRequestId,
-          verifiedAt: deployment.verifiedAt,
-          verifiedAtLabel: formatUnixTimestamp(deployment.verifiedAt)
-        }))
-      };
-    })
-  };
+  const integrationAssetChainIdValue = integrationAssetChainId.trim();
+  const integrationAssetTokenAddressValue = integrationAssetTokenAddress.trim();
+  const integrationAssetTokenIdValue =
+    integrationAssetTokenStandard === "ERC20" ? "0" : integrationAssetTokenId.trim() || "0";
+  const integrationAssetChainIdParsed = Number(integrationAssetChainIdValue);
+  const integrationAssetChainIdValid =
+    Number.isInteger(integrationAssetChainIdParsed) && integrationAssetChainIdParsed > 0;
+  const integrationAssetAddressValid =
+    integrationAssetTokenAddressValue.length > 0 && ethers.isAddress(integrationAssetTokenAddressValue);
+  const integrationAssetTokenIdValid = /^\d+$/.test(integrationAssetTokenIdValue);
+  const canCheckIntegrationAsset =
+    integrationAssetChainIdValid && integrationAssetAddressValid && integrationAssetTokenIdValid;
+
+  const integrationAssetsCount =
+    integrationAssetsResponse &&
+    typeof integrationAssetsResponse === "object" &&
+    typeof (integrationAssetsResponse as { count?: unknown }).count === "number"
+      ? Number((integrationAssetsResponse as { count: number }).count)
+      : 0;
+  const stringifyIntegrationJson = (value: unknown): string =>
+    JSON.stringify(
+      value,
+      (_key, rawValue) => (typeof rawValue === "bigint" ? rawValue.toString() : rawValue),
+      2
+    );
 
   const refreshAssetsGallery = (): void => {
     if (!assetsReadProvider) {
@@ -3772,13 +3665,333 @@ export default function App() {
     void refreshVerifiedAssets(owner, assetsReadProvider, scope);
   };
 
-  const refreshIntegrationAssetsDirectory = (): void => {
-    if (!assetsReadProvider) {
+  const normalizeOnchainAssetRegistryRecord = (assetKey: string, record: readonly unknown[]) => {
+    const sourceChainId = Number(record[1]);
+    const tokenAddress = String(record[2]);
+    const tokenStandard = tokenStandardFromCode(Number(record[4]));
+    const tokenId = String(record[3]);
+    const verifiedAt = Number(record[9]);
+    const updatedAt = Number(record[10]);
+    const revoked = Boolean(record[11]);
+    const exists = Boolean(record[12]);
+
+    return {
+      assetKey,
+      owner: String(record[0]),
+      sourceChainId,
+      sourceChainName: chainName(sourceChainId),
+      tokenAddress,
+      tokenAddressExplorerUrl: contractExplorerUrl(sourceChainId, tokenAddress) || null,
+      tokenId,
+      tokenStandard,
+      symbolOrName: String(record[5]),
+      metadataHash: String(record[6]),
+      metadataUri: String(record[7]),
+      kybRequestId: String(record[8]),
+      verifiedAt,
+      verifiedAtLabel: formatUnixTimestamp(verifiedAt),
+      updatedAt,
+      updatedAtLabel: formatUnixTimestamp(updatedAt),
+      revoked,
+      exists
+    };
+  };
+
+  const checkIntegrationUserOnchain = async (): Promise<void> => {
+    const lookup = (integrationUserQueryValue || account || "").trim();
+    if (!lookup) {
+      setIntegrationUserResponse({
+        ok: false,
+        error: "MISSING_ADDRESS",
+        message: "Enter a wallet address."
+      });
       return;
     }
+
+    if (!ethers.isAddress(lookup)) {
+      setIntegrationUserResponse({
+        ok: false,
+        error: "INVALID_ADDRESS",
+        wallet: lookup,
+        message: "Enter a valid EVM wallet address."
+      });
+      return;
+    }
+
+    if (!integrationReadProvider) {
+      setIntegrationUserResponse({
+        ok: false,
+        error: "NO_READ_PROVIDER",
+        message: "No public read provider is configured."
+      });
+      return;
+    }
+
+    setIntegrationUserChecking(true);
+
+    try {
+      const user = ethers.getAddress(lookup);
+      const [network, verifyResult, attResult, verificationExpResult] = await Promise.all([
+        integrationReadProvider.getNetwork(),
+        makeContracts(integrationReadProvider).registry.verifyUser(user, env.policyId),
+        makeContracts(integrationReadProvider).registry.attestations(user),
+        makeContracts(integrationReadProvider).registry.verificationExpirations(user)
+      ]);
+
+      const flags = BigInt(attResult[0]);
+      const attestationExists = Boolean(attResult[7]);
+      const attestationRevoked = Boolean(attResult[6]);
+      const expHuman = Number(verificationExpResult[0]);
+      const expWorldId = Number(verificationExpResult[1]);
+      const expKyb = Number(verificationExpResult[2]);
+      const now = Math.floor(Date.now() / 1000);
+      const hasHuman = (flags & 1n) === 1n;
+      const hasWorldId = (flags & env.worldIdFlag) === env.worldIdFlag;
+      const hasKyb = (flags & 4n) === 4n;
+
+      const statusFromFlag = (hasFlag: boolean, expiration: number): "missing" | "expired" | "verified" => {
+        if (!attestationExists || attestationRevoked || !hasFlag) {
+          return "missing";
+        }
+        if (expiration > 0 && expiration < now) {
+          return "expired";
+        }
+        return "verified";
+      };
+
+      setIntegrationUserResponse({
+        ok: true,
+        source: "onchain-read",
+        wallet: user,
+        registry: {
+          contract: env.passRegistry,
+          chainId: Number(network.chainId),
+          chainName: chainName(Number(network.chainId)),
+          policyId: env.policyId.toString()
+        },
+        verifyUser: {
+          ok: Boolean(verifyResult[0]),
+          reason: Number(verifyResult[1]),
+          reasonLabel: reasonLabel(Number(verifyResult[1]))
+        },
+        verifications: {
+          kyc: { status: statusFromFlag(hasHuman, expHuman), expiresAt: formatUnixTimestamp(expHuman) },
+          worldId: { status: statusFromFlag(hasWorldId, expWorldId), expiresAt: formatUnixTimestamp(expWorldId) },
+          kyb: { status: statusFromFlag(hasKyb, expKyb), expiresAt: formatUnixTimestamp(expKyb) }
+        },
+        attestation: {
+          exists: attestationExists,
+          revoked: attestationRevoked,
+          flags: flags.toString(),
+          riskScore: Number(attResult[2]),
+          subjectType: Number(attResult[3]),
+          refHash: String(attResult[4]),
+          expiration: Number(attResult[1]),
+          expirationLabel: formatUnixTimestamp(Number(attResult[1])),
+          updatedAt: Number(attResult[5]),
+          updatedAtLabel: formatUnixTimestamp(Number(attResult[5]))
+        },
+        verificationExpirations: {
+          humanExpiration: expHuman,
+          humanExpirationLabel: formatUnixTimestamp(expHuman),
+          worldIdExpiration: expWorldId,
+          worldIdExpirationLabel: formatUnixTimestamp(expWorldId),
+          kybExpiration: expKyb,
+          kybExpirationLabel: formatUnixTimestamp(expKyb)
+        }
+      });
+    } catch (err) {
+      setIntegrationUserResponse({
+        ok: false,
+        source: "onchain-read",
+        error: "READ_FAILED",
+        wallet: lookup,
+        message: (err as Error).message
+      });
+    } finally {
+      setIntegrationUserChecking(false);
+    }
+  };
+
+  const checkIntegrationAssetOnchain = async (): Promise<void> => {
+    if (!integrationReadProvider) {
+      setIntegrationAssetResponse({
+        ok: false,
+        error: "NO_READ_PROVIDER",
+        message: "No public read provider is configured."
+      });
+      return;
+    }
+
+    if (!canCheckIntegrationAsset) {
+      setIntegrationAssetResponse({
+        ok: false,
+        error: "INVALID_INPUT",
+        query: {
+          sourceChainId: integrationAssetChainIdValue || null,
+          tokenAddress: integrationAssetTokenAddressValue || null,
+          tokenStandard: integrationAssetTokenStandard,
+          tokenId: integrationAssetTokenIdValue || null
+        },
+        message: "Provide a valid source chain ID, token contract address, and tokenId (for NFT/1155)."
+      });
+      return;
+    }
+
+    setIntegrationAssetChecking(true);
+
+    try {
+      const sourceChainId = integrationAssetChainIdParsed;
+      const tokenAddress = ethers.getAddress(integrationAssetTokenAddressValue);
+      const tokenId = BigInt(integrationAssetTokenIdValue);
+      const tokenStandardCode = tokenStandardToCode(integrationAssetTokenStandard);
+      const { assetRegistry } = makeContracts(integrationReadProvider);
+      const [network, assetKey] = await Promise.all([
+        integrationReadProvider.getNetwork(),
+        assetRegistry.computeAssetKey(sourceChainId, tokenAddress, tokenId, tokenStandardCode)
+      ]);
+      const rawRecord = (await assetRegistry.assets(assetKey)) as unknown as readonly unknown[];
+      const normalized = normalizeOnchainAssetRegistryRecord(String(assetKey), rawRecord);
+
+      if (!normalized.exists || normalized.revoked) {
+        setIntegrationAssetResponse({
+          ok: false,
+          source: "onchain-read",
+          error: normalized.revoked ? "ASSET_REVOKED" : "ASSET_NOT_FOUND",
+          query: {
+            sourceChainId,
+            sourceChainName: chainName(sourceChainId),
+            tokenAddress,
+            tokenStandard: integrationAssetTokenStandard,
+            tokenId: tokenId.toString()
+          },
+          assetKey,
+          registry: {
+            contract: env.assetRegistry,
+            chainId: Number(network.chainId),
+            chainName: chainName(Number(network.chainId))
+          }
+        });
+      } else {
+        setIntegrationAssetResponse({
+          ok: true,
+          source: "onchain-read",
+          registry: {
+            contract: env.assetRegistry,
+            chainId: Number(network.chainId),
+            chainName: chainName(Number(network.chainId))
+          },
+          query: {
+            sourceChainId,
+            sourceChainName: chainName(sourceChainId),
+            tokenAddress,
+            tokenStandard: integrationAssetTokenStandard,
+            tokenId: tokenId.toString()
+          },
+          asset: normalized
+        });
+      }
+    } catch (err) {
+      setIntegrationAssetResponse({
+        ok: false,
+        source: "onchain-read",
+        error: "READ_FAILED",
+        query: {
+          sourceChainId: integrationAssetChainIdValue || null,
+          tokenAddress: integrationAssetTokenAddressValue || null,
+          tokenStandard: integrationAssetTokenStandard,
+          tokenId: integrationAssetTokenIdValue || null
+        },
+        message: (err as Error).message
+      });
+    } finally {
+      setIntegrationAssetChecking(false);
+    }
+  };
+
+  const readIntegrationPublicAssetsOnchain = async (activeProvider: AssetReadProvider): Promise<unknown> => {
+    const { assetRegistry } = makeContracts(activeProvider);
+    const [network, latestBlock] = await Promise.all([activeProvider.getNetwork(), activeProvider.getBlockNumber()]);
+    const logs = await assetRegistry.queryFilter(assetRegistry.filters.AssetVerified(), 0, latestBlock);
+    const uniqueAssetKeys = new Set<string>();
+    const latestVerifyMetaByKey = new Map<string, { txHash?: string; blockNumber?: number }>();
+
+    for (const log of logs) {
+      const rawAssetKey = String((log as { args?: { assetKey?: unknown } }).args?.assetKey ?? "");
+      if (!rawAssetKey) {
+        continue;
+      }
+      uniqueAssetKeys.add(rawAssetKey);
+      latestVerifyMetaByKey.set(rawAssetKey.toLowerCase(), {
+        txHash: log.transactionHash,
+        blockNumber: log.blockNumber
+      });
+    }
+
+    const assets: Array<Record<string, unknown>> = [];
+    for (const assetKey of uniqueAssetKeys) {
+      const rawRecord = (await assetRegistry.assets(assetKey)) as unknown as readonly unknown[];
+      const normalized = normalizeOnchainAssetRegistryRecord(assetKey, rawRecord);
+      if (!normalized.exists || normalized.revoked) {
+        continue;
+      }
+      const latestMeta = latestVerifyMetaByKey.get(assetKey.toLowerCase());
+      assets.push({
+        ...normalized,
+        verifyTxHash: latestMeta?.txHash ?? null,
+        verifyBlockNumber: latestMeta?.blockNumber ?? null
+      });
+    }
+
+    assets.sort((left, right) => {
+      const leftVerifiedAt = Number((left as { verifiedAt?: unknown }).verifiedAt ?? 0);
+      const rightVerifiedAt = Number((right as { verifiedAt?: unknown }).verifiedAt ?? 0);
+      return rightVerifiedAt - leftVerifiedAt;
+    });
+
+    return {
+      ok: true,
+      source: "onchain-read",
+      registry: {
+        contract: env.assetRegistry,
+        chainId: Number(network.chainId),
+        chainName: chainName(Number(network.chainId)),
+        latestBlock
+      },
+      count: assets.length,
+      assets
+    };
+  };
+
+  const refreshIntegrationAssetsDirectory = (): void => {
+    if (!integrationReadProvider) {
+      setIntegrationAssetsRequested(true);
+      setIntegrationAssetsResponse({
+        ok: false,
+        error: "NO_READ_PROVIDER",
+        message: "No public read provider is configured."
+      });
+      return;
+    }
+
     setIntegrationAssetsRequested(true);
-    setResolvedAssetMetadataByUri({});
-    void refreshVerifiedAssets(undefined, assetsReadProvider, "public");
+    setIntegrationAssetsLoading(true);
+
+    void (async () => {
+      try {
+        const response = await readIntegrationPublicAssetsOnchain(integrationReadProvider);
+        setIntegrationAssetsResponse(response);
+      } catch (err) {
+        setIntegrationAssetsResponse({
+          ok: false,
+          source: "onchain-read",
+          error: "READ_FAILED",
+          message: (err as Error).message
+        });
+      } finally {
+        setIntegrationAssetsLoading(false);
+      }
+    })();
   };
 
   return (
@@ -3870,8 +4083,7 @@ export default function App() {
           <span className="badge neutral">No API key</span>
         </div>
         <p className="card-text integrations-intro">
-          Public read methods for a verified asset registry contract plus local demo checks for user verification status,
-          asset lookup, and directory listing.
+          Public on-chain reads for user verification status, asset lookup, and verified asset directory listing.
         </p>
 
         <div className="integrations-grid">
@@ -3886,8 +4098,12 @@ export default function App() {
             <div className="integration-method-target" aria-label="Registry read target">
               <div className="integration-method-target-grid">
                 <div className="integration-method-target-item">
-                  <span>Contract</span>
-                  <code>{integrationRegistryContractLabel}</code>
+                  <span>PassRegistry (user verifications)</span>
+                  <code>{integrationVerificationRegistryContractLabel}</code>
+                </div>
+                <div className="integration-method-target-item">
+                  <span>AssetRegistry (assets directory)</span>
+                  <code>{integrationAssetRegistryContractLabel}</code>
                 </div>
                 <div className="integration-method-target-item">
                   <span>Network</span>
@@ -3927,10 +4143,10 @@ export default function App() {
           <article className="card integrations-card">
             <div className="card-head">
               <h2>Check User Verifications</h2>
-              <span className="badge neutral">Demo</span>
+              <span className="badge ok">Onchain</span>
             </div>
             <p className="card-text">
-              Query verification status by wallet. In this demo, full status is available for the connected wallet session.
+              Query verification status by any wallet address using public reads from the verification registry contract.
             </p>
             <div className="integration-input-row">
               <input
@@ -3943,14 +4159,16 @@ export default function App() {
               <button
                 className="btn"
                 type="button"
-                onClick={() => setIntegrationUserLookup((integrationUserQuery.trim() || account || "").trim())}
-                disabled={!integrationUserQuery.trim() && !account}
+                onClick={() => void checkIntegrationUserOnchain()}
+                disabled={integrationUserChecking || (!integrationUserQuery.trim() && !account)}
               >
-                Check
+                {integrationUserChecking ? "Checking..." : "Check"}
               </button>
             </div>
-            {integrationUserCheckResponse ? (
-              <pre className="integration-json">{JSON.stringify(integrationUserCheckResponse, null, 2)}</pre>
+            {integrationUserResponse ? (
+              <pre className="integration-json">{stringifyIntegrationJson(integrationUserResponse)}</pre>
+            ) : integrationUserChecking ? (
+              <p className="hint">Reading verification status on-chain...</p>
             ) : (
               <p className="hint">Enter a wallet address and click `Check`.</p>
             )}
@@ -3959,32 +4177,72 @@ export default function App() {
           <article className="card integrations-card">
             <div className="card-head">
               <h2>Check Asset</h2>
-              <span className="badge neutral">Demo</span>
+              <span className="badge ok">Onchain</span>
             </div>
             <p className="card-text">
-              Find a verified asset by asset key, name, metadata URI, owner address, chain ID, or deployment token address.
+              Resolve an asset in the registry using source network + token contract (+ tokenId for NFT / ERC1155).
             </p>
-            <div className="integration-input-row">
+            <div className="integration-form-grid">
+              <select
+                className="integration-input"
+                value={integrationAssetChainId}
+                onChange={(event) => setIntegrationAssetChainId(event.target.value)}
+              >
+                {NETWORK_OPTIONS.map((network) => (
+                  <option key={network.chainId} value={String(network.chainId)}>
+                    {network.label} ({network.chainId})
+                  </option>
+                ))}
+              </select>
+              <select
+                className="integration-input"
+                value={integrationAssetTokenStandard}
+                onChange={(event) => {
+                  const value = event.target.value as TokenStandard;
+                  setIntegrationAssetTokenStandard(value);
+                  if (value === "ERC20") {
+                    setIntegrationAssetTokenId("0");
+                  } else if (!integrationAssetTokenId.trim() || integrationAssetTokenId === "0") {
+                    setIntegrationAssetTokenId("1");
+                  }
+                }}
+              >
+                <option value="ERC20">ERC20</option>
+                <option value="ERC721">ERC721</option>
+                <option value="ERC1155">ERC1155</option>
+              </select>
+            </div>
+            <div className="integration-input-row integration-input-row-asset">
               <input
                 className="integration-input"
                 type="text"
-                value={integrationAssetQuery}
-                onChange={(event) => setIntegrationAssetQuery(event.target.value)}
-                placeholder="asset key, token address, metadata URI, name..."
+                value={integrationAssetTokenAddress}
+                onChange={(event) => setIntegrationAssetTokenAddress(event.target.value)}
+                placeholder="0x... token contract"
+              />
+              <input
+                className="integration-input integration-input-token-id"
+                type="text"
+                value={integrationAssetTokenStandard === "ERC20" ? "0" : integrationAssetTokenId}
+                onChange={(event) => setIntegrationAssetTokenId(event.target.value)}
+                placeholder="tokenId"
+                disabled={integrationAssetTokenStandard === "ERC20"}
               />
               <button
                 className="btn"
                 type="button"
-                onClick={() => setIntegrationAssetLookup(integrationAssetQuery.trim())}
-                disabled={!integrationAssetQuery.trim()}
+                onClick={() => void checkIntegrationAssetOnchain()}
+                disabled={integrationAssetChecking || !canCheckIntegrationAsset}
               >
-                Check
+                {integrationAssetChecking ? "Checking..." : "Check"}
               </button>
             </div>
-            {integrationAssetCheckResponse ? (
-              <pre className="integration-json">{JSON.stringify(integrationAssetCheckResponse, null, 2)}</pre>
+            {integrationAssetResponse ? (
+              <pre className="integration-json">{stringifyIntegrationJson(integrationAssetResponse)}</pre>
+            ) : integrationAssetChecking ? (
+              <p className="hint">Reading asset record on-chain...</p>
             ) : (
-              <p className="hint">Enter any asset identifier and click `Check`.</p>
+              <p className="hint">Select a source network and contract, then click `Check`.</p>
             )}
           </article>
 
@@ -3992,21 +4250,21 @@ export default function App() {
             <div className="queue-head">
               <h3>All Assets (Directory Preview)</h3>
               <div className="queue-actions">
-                <span className={`badge ${integrationAssetsRequested && verifiedAssets.length > 0 ? "ok" : "neutral"}`}>
-                  {integrationAssetsRequested ? verifiedAssets.length : "-"}
+                <span className={`badge ${integrationAssetsRequested && integrationAssetsCount > 0 ? "ok" : "neutral"}`}>
+                  {integrationAssetsRequested ? integrationAssetsCount : "-"}
                 </span>
                 <button
                   className="btn refresh-btn"
                   type="button"
                   onClick={refreshIntegrationAssetsDirectory}
-                  disabled={busy || refreshingAssets || !canReadPublicAssets}
-                  aria-busy={refreshingAssets}
+                  disabled={busy || integrationAssetsLoading || !integrationReadProvider}
+                  aria-busy={integrationAssetsLoading}
                 >
                   <span className="refresh-btn-label" aria-live="polite">
-                    <span className={`refresh-btn-state${refreshingAssets ? " is-hidden" : ""}`} aria-hidden={refreshingAssets}>
+                    <span className={`refresh-btn-state${integrationAssetsLoading ? " is-hidden" : ""}`} aria-hidden={integrationAssetsLoading}>
                       {integrationAssetsRequested ? "Refresh" : "Get all assets"}
                     </span>
-                    <span className={`refresh-btn-state${refreshingAssets ? "" : " is-hidden"}`} aria-hidden={!refreshingAssets}>
+                    <span className={`refresh-btn-state${integrationAssetsLoading ? "" : " is-hidden"}`} aria-hidden={!integrationAssetsLoading}>
                       <span className="btn-spinner" aria-hidden="true" />
                       {integrationAssetsRequested ? "Refreshing..." : "Loading..."}
                     </span>
@@ -4016,11 +4274,13 @@ export default function App() {
             </div>
             {!integrationAssetsRequested ? (
               <p className="empty-state">Click `Get all assets` to load the verified asset directory from the public registry.</p>
-            ) : refreshingAssets && verifiedAssets.length === 0 ? (
+            ) : integrationAssetsLoading && integrationAssetsCount === 0 ? (
               <p className="empty-state">Loading verified assets from the public registry...</p>
-            ) : verifiedAssets.length === 0 ? (
+            ) : integrationAssetsResponse ? (
+              <pre className="integration-json">{stringifyIntegrationJson(integrationAssetsResponse)}</pre>
+            ) : (
               <p className="empty-state">No verified assets loaded yet. Click `Refresh` to re-query the public registry.</p>
-            ) : <pre className="integration-json">{JSON.stringify(integrationAssetsDirectoryResponse, null, 2)}</pre>}
+            )}
           </article>
         </div>
       </section>

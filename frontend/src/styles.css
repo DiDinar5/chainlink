@@ -1531,6 +1531,21 @@ textarea {
   align-items: center;
 }
 
+.integration-input-row-asset {
+  grid-template-columns: minmax(0, 1fr) minmax(84px, 0.35fr) auto;
+}
+
+.integration-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(110px, 0.55fr);
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.integration-input-token-id {
+  min-width: 0;
+}
+
 .integration-input {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -2218,6 +2233,14 @@ a.verified-network-pill:hover {
   }
 
   .integration-input-row {
+    grid-template-columns: 1fr;
+  }
+
+  .integration-input-row-asset {
+    grid-template-columns: 1fr;
+  }
+
+  .integration-form-grid {
     grid-template-columns: 1fr;
   }
 
