@@ -59,7 +59,7 @@ type KybStubStatus = "not_started" | "in_review" | "verified";
 type TokenStandard = "ERC20" | "ERC721" | "ERC1155";
 type BuyerVerificationRequirement = "open" | "kyc" | "worldid" | "kyc_worldid";
 
-type AppTab = "assets" | "personal" | "business";
+type AppTab = "assets" | "personal" | "business" | "integrations";
 type UiTheme = "light" | "dark";
 
 type NetworkOption = {
@@ -1532,6 +1532,11 @@ export default function App() {
   const [refreshingAssets, setRefreshingAssets] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<AppTab>("assets");
   const [assetsViewMode, setAssetsViewMode] = useState<AssetsViewMode>("all");
+  const [integrationUserQuery, setIntegrationUserQuery] = useState<string>("");
+  const [integrationUserLookup, setIntegrationUserLookup] = useState<string>("");
+  const [integrationAssetQuery, setIntegrationAssetQuery] = useState<string>("");
+  const [integrationAssetLookup, setIntegrationAssetLookup] = useState<string>("");
+  const [integrationAssetsRequested, setIntegrationAssetsRequested] = useState<boolean>(false);
   const [uiTheme, setUiTheme] = useState<UiTheme>(() => {
     if (typeof window === "undefined") {
       return "dark";
@@ -3573,6 +3578,190 @@ export default function App() {
   const canReadPublicAssets = Boolean(assetsReadProvider);
   const canReadMineAssets = Boolean(assetsReadProvider && account);
   const canReadCurrentAssetsView = wantsMineAssets ? canReadMineAssets : canReadPublicAssets;
+  const integrationRegistryNetworkLabel = `${chainName(env.chainId)} (${env.chainId})`;
+  const integrationRegistryContractLabel = env.passRegistry || "-";
+  const integrationMethodGuide = [
+    {
+      key: "user",
+      step: "1",
+      title: "Check user verifications",
+      input: "wallet address",
+      methods: [
+        "verifyUser(address user, uint256 policyId)",
+        "attestations(address user)",
+        "verificationExpirations(address user)"
+      ],
+      note: "Aggregate these reads into KYC / World ID / KYB status."
+    },
+    {
+      key: "asset",
+      step: "2",
+      title: "Check asset by contract",
+      input: "chainId + tokenAddress (+ tokenId for NFT)",
+      methods: [
+        "resolveAssetByToken(chainId, tokenAddress, tokenStandard, tokenId)",
+        "getAssetCore(uint256 assetId)",
+        "getAssetDeploymentCount(uint256 assetId)",
+        "getAssetDeployment(uint256 assetId, uint256 index)"
+      ],
+      note: "Resolve contract -> assetId, then fetch canonical asset details."
+    },
+    {
+      key: "list",
+      step: "3",
+      title: "List all verified assets",
+      input: "offset + limit",
+      methods: [
+        "getVerifiedAssetIds(uint256 offset, uint256 limit)",
+        "getAssetCore(uint256 assetId)",
+        "getAssetDeploymentCount(uint256 assetId)",
+        "getAssetDeployment(uint256 assetId, uint256 index)"
+      ],
+      note: "Use pagination and hydrate asset details in batches."
+    }
+  ] as const;
+
+  const integrationUserLookupValue = integrationUserLookup.trim();
+  const integrationUserAddressValid =
+    integrationUserLookupValue.length > 0 ? ethers.isAddress(integrationUserLookupValue) : false;
+  const integrationUserMatchesConnected =
+    Boolean(
+      account &&
+        integrationUserAddressValid &&
+        account.toLowerCase() === integrationUserLookupValue.toLowerCase()
+    );
+  const integrationUserCheckResponse = !integrationUserLookupValue
+    ? null
+    : !integrationUserAddressValid
+      ? {
+          ok: false,
+          error: "INVALID_ADDRESS",
+          wallet: integrationUserLookupValue,
+          message: "Enter a valid EVM wallet address."
+        }
+      : integrationUserMatchesConnected
+        ? {
+            ok: true,
+            source: "local-session-demo",
+            wallet: integrationUserLookupValue,
+            knownWallet: true,
+            verifications: {
+              kyc: { status: kycQuickLabel.toLowerCase(), expiresAt: kycQuickExpLabel },
+              worldId: { status: worldIdQuickLabel.toLowerCase(), expiresAt: worldIdQuickExpLabel },
+              kyb: { status: kybQuickLabel.toLowerCase(), expiresAt: kybQuickExpLabel }
+            },
+            flags: {
+              hasKycFlag,
+              hasWorldIdFlag,
+              hasKybFlag,
+              hasActiveWorldIdFlag,
+              hasActiveKybFlag
+            }
+          }
+        : {
+            ok: true,
+            source: "local-session-demo",
+            wallet: integrationUserLookupValue,
+            knownWallet: false,
+            message: "This demo only exposes full verification state for the currently connected wallet.",
+            verifications: {
+              kyc: { status: "unknown", expiresAt: "-" },
+              worldId: { status: "unknown", expiresAt: "-" },
+              kyb: { status: "unknown", expiresAt: "-" }
+            }
+          };
+
+  const integrationAssetLookupValue = integrationAssetLookup.trim();
+  const integrationAssetLookupNormalized = integrationAssetLookupValue.toLowerCase();
+  const integrationAssetMatch = integrationAssetLookupNormalized
+    ? verifiedAssets.find((asset) => {
+        if (asset.groupId.toLowerCase().includes(integrationAssetLookupNormalized)) {
+          return true;
+        }
+        if (asset.name.toLowerCase().includes(integrationAssetLookupNormalized)) {
+          return true;
+        }
+        if (asset.metadataUri.toLowerCase().includes(integrationAssetLookupNormalized)) {
+          return true;
+        }
+        if (asset.owner.toLowerCase() === integrationAssetLookupNormalized) {
+          return true;
+        }
+        return asset.deployments.some((deployment) => {
+          return (
+            deployment.tokenAddress.toLowerCase() === integrationAssetLookupNormalized ||
+            `${deployment.chainId}` === integrationAssetLookupNormalized
+          );
+        });
+      })
+    : null;
+  const integrationAssetMetadata = integrationAssetMatch
+    ? resolvedAssetMetadataByUri[integrationAssetMatch.metadataUri]
+    : undefined;
+  const integrationAssetRequirement: BuyerVerificationRequirement =
+    integrationAssetMetadata?.buyerVerificationRequirement || integrationAssetMatch?.buyerVerificationRequirement || "open";
+  const integrationAssetCheckResponse = !integrationAssetLookupValue
+    ? null
+    : integrationAssetMatch
+      ? {
+          ok: true,
+          assetKey: integrationAssetMatch.groupId,
+          status: "verified",
+          name: integrationAssetMetadata?.name || integrationAssetMatch.name,
+          publisher: integrationAssetMatch.owner,
+          metadataUri: integrationAssetMatch.metadataUri,
+          metadataHash: integrationAssetMatch.metadataHash,
+          company: integrationAssetMetadata?.companyLegalName || integrationAssetMatch.companyLegalName || "-",
+          verificationRequirement: buyerVerificationRequirementLabel(integrationAssetRequirement),
+          deployments: integrationAssetMatch.deployments.map((deployment) => ({
+            chainId: deployment.chainId,
+            chainName: chainName(deployment.chainId),
+            tokenStandard: deployment.tokenStandard,
+            tokenAddress: deployment.tokenAddress,
+            tokenId: deployment.tokenId,
+            kybRequestId: deployment.kybRequestId,
+            verifiedAt: formatUnixTimestamp(deployment.verifiedAt)
+          }))
+        }
+      : {
+          ok: false,
+          error: "ASSET_NOT_FOUND",
+          query: integrationAssetLookupValue,
+          message: "No matching verified asset found in the current local directory snapshot."
+        };
+  const integrationAssetsDirectoryResponse = {
+    ok: true,
+    scope: "public",
+    count: verifiedAssets.length,
+    assets: verifiedAssets.map((asset) => {
+      const metadataPreview = resolvedAssetMetadataByUri[asset.metadataUri];
+      const requirement: BuyerVerificationRequirement =
+        metadataPreview?.buyerVerificationRequirement || asset.buyerVerificationRequirement || "open";
+      return {
+        assetKey: asset.groupId,
+        status: "verified",
+        name: metadataPreview?.name || asset.name,
+        publisher: asset.owner,
+        publisherShort: shortAddress(asset.owner),
+        company: metadataPreview?.companyLegalName || asset.companyLegalName || null,
+        metadataUri: asset.metadataUri,
+        metadataHash: asset.metadataHash,
+        verificationRequirement: buyerVerificationRequirementLabel(requirement),
+        lastVerifiedAt: asset.latestVerifiedAt,
+        lastVerifiedAtLabel: formatUnixTimestamp(asset.latestVerifiedAt),
+        deployments: asset.deployments.map((deployment) => ({
+          chainId: deployment.chainId,
+          chainName: chainName(deployment.chainId),
+          tokenStandard: deployment.tokenStandard,
+          tokenAddress: deployment.tokenAddress,
+          tokenId: deployment.tokenId,
+          kybRequestId: deployment.kybRequestId,
+          verifiedAt: deployment.verifiedAt,
+          verifiedAtLabel: formatUnixTimestamp(deployment.verifiedAt)
+        }))
+      };
+    })
+  };
 
   const refreshAssetsGallery = (): void => {
     if (!assetsReadProvider) {
@@ -3583,13 +3772,22 @@ export default function App() {
     void refreshVerifiedAssets(owner, assetsReadProvider, scope);
   };
 
+  const refreshIntegrationAssetsDirectory = (): void => {
+    if (!assetsReadProvider) {
+      return;
+    }
+    setIntegrationAssetsRequested(true);
+    setResolvedAssetMetadataByUri({});
+    void refreshVerifiedAssets(undefined, assetsReadProvider, "public");
+  };
+
   return (
     <div className="flow-page">
       <header className="hero-card">
         <div className="hero-copy">
-          <h1>Verified Asset Market</h1>
+          <h1>Verified Assets Market</h1>
           <p className="hero-text">
-            One place to manage cross-chain assets that require KYC, World ID, or KYB verification.
+            Chainlink CRE Hackathon 2026 demo for cross-chain assets that require KYC, World ID, or KYB verification.
           </p>
         </div>
         <div className="hero-actions">
@@ -3654,8 +3852,179 @@ export default function App() {
           >
             <span>Business</span>
           </button>
+          <button
+            className={`section-tab ${activeTab === "integrations" ? "active" : ""}`}
+            onClick={() => setActiveTab("integrations")}
+            aria-pressed={activeTab === "integrations"}
+            type="button"
+          >
+            <span>Integrations</span>
+          </button>
         </div>
       </section>
+
+      {activeTab === "integrations" ? (
+      <section className="tab-section-group integrations-wrap" aria-label="Integrations">
+        <div className="queue-head">
+          <h3>Integrations</h3>
+          <span className="badge neutral">No API key</span>
+        </div>
+        <p className="card-text integrations-intro">
+          Public read methods for a verified asset registry contract plus local demo checks for user verification status,
+          asset lookup, and directory listing.
+        </p>
+
+        <div className="integrations-grid">
+          <article className="card integrations-card integrations-card-wide">
+            <div className="card-head">
+              <h2>Public Contract Read Methods</h2>
+              <span className="badge ok">Onchain</span>
+            </div>
+            <p className="card-text">
+              No API keys: any marketplace can use public reads in 3 steps.
+            </p>
+            <div className="integration-method-target" aria-label="Registry read target">
+              <div className="integration-method-target-grid">
+                <div className="integration-method-target-item">
+                  <span>Contract</span>
+                  <code>{integrationRegistryContractLabel}</code>
+                </div>
+                <div className="integration-method-target-item">
+                  <span>Network</span>
+                  <code>{integrationRegistryNetworkLabel}</code>
+                </div>
+              </div>
+              <p className="hint integration-method-target-note">
+                All calls below are read-only (`eth_call`) and do not spend gas. RPC providers may still apply rate
+                limits.
+              </p>
+            </div>
+            <div className="integration-method-groups" aria-label="Integration method groups">
+              {integrationMethodGuide.map((group) => (
+                <section className="integration-method-group" key={group.key}>
+                  <div className="integration-method-group-head">
+                    <span className="integration-method-step">{group.step}</span>
+                    <div>
+                      <strong>{group.title}</strong>
+                      <div className="integration-method-input">
+                        Input: <code>{group.input}</code>
+                      </div>
+                    </div>
+                  </div>
+                  <ul className="integration-method-list integration-method-list-compact">
+                    {group.methods.map((signature) => (
+                      <li key={`${group.key}:${signature}`}>
+                        <code>{signature}</code>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="hint integration-method-note">{group.note}</p>
+                </section>
+              ))}
+            </div>
+          </article>
+
+          <article className="card integrations-card">
+            <div className="card-head">
+              <h2>Check User Verifications</h2>
+              <span className="badge neutral">Demo</span>
+            </div>
+            <p className="card-text">
+              Query verification status by wallet. In this demo, full status is available for the connected wallet session.
+            </p>
+            <div className="integration-input-row">
+              <input
+                className="integration-input"
+                type="text"
+                value={integrationUserQuery}
+                onChange={(event) => setIntegrationUserQuery(event.target.value)}
+                placeholder={account ? `e.g. ${account}` : "0x... wallet address"}
+              />
+              <button
+                className="btn"
+                type="button"
+                onClick={() => setIntegrationUserLookup((integrationUserQuery.trim() || account || "").trim())}
+                disabled={!integrationUserQuery.trim() && !account}
+              >
+                Check
+              </button>
+            </div>
+            {integrationUserCheckResponse ? (
+              <pre className="integration-json">{JSON.stringify(integrationUserCheckResponse, null, 2)}</pre>
+            ) : (
+              <p className="hint">Enter a wallet address and click `Check`.</p>
+            )}
+          </article>
+
+          <article className="card integrations-card">
+            <div className="card-head">
+              <h2>Check Asset</h2>
+              <span className="badge neutral">Demo</span>
+            </div>
+            <p className="card-text">
+              Find a verified asset by asset key, name, metadata URI, owner address, chain ID, or deployment token address.
+            </p>
+            <div className="integration-input-row">
+              <input
+                className="integration-input"
+                type="text"
+                value={integrationAssetQuery}
+                onChange={(event) => setIntegrationAssetQuery(event.target.value)}
+                placeholder="asset key, token address, metadata URI, name..."
+              />
+              <button
+                className="btn"
+                type="button"
+                onClick={() => setIntegrationAssetLookup(integrationAssetQuery.trim())}
+                disabled={!integrationAssetQuery.trim()}
+              >
+                Check
+              </button>
+            </div>
+            {integrationAssetCheckResponse ? (
+              <pre className="integration-json">{JSON.stringify(integrationAssetCheckResponse, null, 2)}</pre>
+            ) : (
+              <p className="hint">Enter any asset identifier and click `Check`.</p>
+            )}
+          </article>
+
+          <article className="card integrations-card integrations-card-wide">
+            <div className="queue-head">
+              <h3>All Assets (Directory Preview)</h3>
+              <div className="queue-actions">
+                <span className={`badge ${integrationAssetsRequested && verifiedAssets.length > 0 ? "ok" : "neutral"}`}>
+                  {integrationAssetsRequested ? verifiedAssets.length : "-"}
+                </span>
+                <button
+                  className="btn refresh-btn"
+                  type="button"
+                  onClick={refreshIntegrationAssetsDirectory}
+                  disabled={busy || refreshingAssets || !canReadPublicAssets}
+                  aria-busy={refreshingAssets}
+                >
+                  <span className="refresh-btn-label" aria-live="polite">
+                    <span className={`refresh-btn-state${refreshingAssets ? " is-hidden" : ""}`} aria-hidden={refreshingAssets}>
+                      {integrationAssetsRequested ? "Refresh" : "Get all assets"}
+                    </span>
+                    <span className={`refresh-btn-state${refreshingAssets ? "" : " is-hidden"}`} aria-hidden={!refreshingAssets}>
+                      <span className="btn-spinner" aria-hidden="true" />
+                      {integrationAssetsRequested ? "Refreshing..." : "Loading..."}
+                    </span>
+                  </span>
+                </button>
+              </div>
+            </div>
+            {!integrationAssetsRequested ? (
+              <p className="empty-state">Click `Get all assets` to load the verified asset directory from the public registry.</p>
+            ) : refreshingAssets && verifiedAssets.length === 0 ? (
+              <p className="empty-state">Loading verified assets from the public registry...</p>
+            ) : verifiedAssets.length === 0 ? (
+              <p className="empty-state">No verified assets loaded yet. Click `Refresh` to re-query the public registry.</p>
+            ) : <pre className="integration-json">{JSON.stringify(integrationAssetsDirectoryResponse, null, 2)}</pre>}
+          </article>
+        </div>
+      </section>
+      ) : null}
 
       {activeTab === "personal" || activeTab === "business" ? (
       <section className="tab-section-group" aria-label={activeTab === "personal" ? "Personal verifications" : "Business verification"}>
