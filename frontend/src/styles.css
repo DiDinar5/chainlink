@@ -3528,6 +3528,15 @@ body.theme-light .card.registry-card-assets:hover {
   -webkit-backdrop-filter: none;
 }
 
+body.theme-light .card.integrations-card-plain,
+body.theme-light .card.integrations-card-plain:hover {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 body.theme-light .section-tabs-card,
 body.theme-light .section-tabs-card:hover {
   background: transparent;
