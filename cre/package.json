@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "lint": "echo 'No lint configured for cre'",
-    "dev:worker": "tsx src/workflows/worker.ts --loop",
+    "dev:worker": "npm run build && node dist/workflows/worker.js --loop",
+    "dev:worker:tsx": "tsx src/workflows/worker.ts --loop",
     "run:worker": "tsx src/workflows/worker.ts"
   },
   "dependencies": {

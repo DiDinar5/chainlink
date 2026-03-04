@@ -1,0 +1,2 @@
+3750:                {kybCompanyLinked ? <span className="badge ok">Linked</span> : null}
+4226:                    <span className="badge ok verified-card-media-badge">Verified</span>

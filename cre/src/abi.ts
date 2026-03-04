@@ -12,9 +12,11 @@ export const BROKER_ABI = [
 
 export const REGISTRY_ABI = [
   "function attest(address user, (uint256 flags, uint64 expiration, uint32 riskScore, uint8 subjectType, bytes32 refHash) data)",
+  "function attestV2(address user, (uint256 flags, uint64 humanExpiration, uint64 worldIdExpiration, uint64 kybExpiration, uint32 riskScore, uint8 subjectType, bytes32 refHash) data)",
   "function revoke(address user)",
   "function verifyUser(address user, uint256 policyId) view returns (bool ok, uint8 reason)",
-  "function attestations(address user) view returns (uint256 flags, uint64 expiration, uint32 riskScore, uint8 subjectType, bytes32 refHash, uint64 updatedAt, bool revoked, bool exists)"
+  "function attestations(address user) view returns (uint256 flags, uint64 expiration, uint32 riskScore, uint8 subjectType, bytes32 refHash, uint64 updatedAt, bool revoked, bool exists)",
+  "function verificationExpirations(address user) view returns (uint64 humanExpiration, uint64 worldIdExpiration, uint64 kybExpiration)"
 ] as const;
 
 export const ASSET_REGISTRY_ABI = [

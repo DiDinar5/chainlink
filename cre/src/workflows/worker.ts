@@ -60,6 +60,22 @@ function resolveSumsubUserIdForSync(state: WorkflowState, user: string, requestI
   return fallback;
 }
 
+function parseVerificationExpirations(raw: readonly unknown[]): {
+  humanExpiration: number;
+  worldIdExpiration: number;
+  kybExpiration: number;
+} {
+  return {
+    humanExpiration: Number(raw[0] ?? 0),
+    worldIdExpiration: Number(raw[1] ?? 0),
+    kybExpiration: Number(raw[2] ?? 0)
+  };
+}
+
+function isUnexpired(expiration: number, now: number): boolean {
+  return expiration === 0 || expiration >= now;
+}
+
 async function readKycRequests(fromBlock: number, toBlock: number): Promise<KycRequestEventData[]> {
   if (fromBlock > toBlock) {
     return [];
@@ -301,8 +317,8 @@ async function runIssueSdkTokenPass(latestBlock: number): Promise<void> {
 async function upsertAttestation(user: string): Promise<void> {
   const registry = getRegistry();
   const current = await registry.attestations(user);
+  const currentExps = parseVerificationExpirations((await registry.verificationExpirations(user)) as readonly unknown[]);
   const currentFlags = BigInt(current[0]);
-  const currentExpiration = Number(current[1]);
   const currentRevoked = Boolean(current[6]);
   const currentExists = Boolean(current[7]);
   const nextFlags = currentFlags | config.flagHuman;
@@ -314,7 +330,7 @@ async function upsertAttestation(user: string): Promise<void> {
     currentExists &&
     !currentRevoked &&
     (currentFlags & config.flagHuman) === config.flagHuman &&
-    currentExpiration > now
+    isUnexpired(currentExps.humanExpiration, now)
   ) {
     console.log(`user=${user} already has active HUMAN attestation, skip`);
     return;
@@ -323,9 +339,12 @@ async function upsertAttestation(user: string): Promise<void> {
   const expiration = BigInt(now + config.attestationExpirationDays * 24 * 60 * 60);
   const refHash = ethers.keccak256(ethers.toUtf8Bytes(`${user}:${Date.now()}`));
 
-  const tx = await registry.attest(user, {
+  const tx = await registry.attestV2(user, {
     flags: nextFlags,
-    expiration,
+    humanExpiration: expiration,
+    worldIdExpiration:
+      (currentFlags & config.flagWorldId) === config.flagWorldId ? BigInt(currentExps.worldIdExpiration) : 0n,
+    kybExpiration: (currentFlags & config.flagKyb) === config.flagKyb ? BigInt(currentExps.kybExpiration) : 0n,
     riskScore: 0,
     subjectType: 1,
     refHash
@@ -367,30 +386,34 @@ async function applyDecision(user: string, decision: ReviewDecision): Promise<vo
 async function upsertKybAttestation(user: string, kybRequestId: bigint): Promise<{ alreadyVerified: boolean; txHash?: string }> {
   const registry = getRegistry();
   const current = await registry.attestations(user);
+  const currentExps = parseVerificationExpirations((await registry.verificationExpirations(user)) as readonly unknown[]);
   const now = Math.floor(Date.now() / 1000);
 
   const currentFlags = BigInt(current[0]);
-  const currentExpiration = Number(current[1]);
   const currentRiskScore = Number(current[2]);
   const currentSubjectType = Number(current[3]);
   const currentRevoked = Boolean(current[6]);
   const currentExists = Boolean(current[7]);
   const hasKyb = (currentFlags & config.flagKyb) === config.flagKyb;
 
-  if (currentExists && !currentRevoked && hasKyb && currentExpiration > now) {
+  if (currentExists && !currentRevoked && hasKyb && isUnexpired(currentExps.kybExpiration, now)) {
     return { alreadyVerified: true };
   }
 
   const nextFlags = currentFlags | config.flagHuman | config.flagKyb;
   const fallbackExpiration = now + config.attestationExpirationDays * 24 * 60 * 60;
-  const nextExpiration = BigInt(Math.max(currentExpiration, fallbackExpiration));
+  const nextKybExpiration = BigInt(Math.max(currentExps.kybExpiration, fallbackExpiration));
   const refHash = ethers.keccak256(
     ethers.toUtf8Bytes(`kyb:${user.toLowerCase()}:${kybRequestId.toString()}:${Date.now()}`)
   );
 
-  const tx = await registry.attest(user, {
+  const tx = await registry.attestV2(user, {
     flags: nextFlags,
-    expiration: nextExpiration,
+    humanExpiration:
+      (currentFlags & config.flagHuman) === config.flagHuman ? BigInt(currentExps.humanExpiration) : BigInt(fallbackExpiration),
+    worldIdExpiration:
+      (currentFlags & config.flagWorldId) === config.flagWorldId ? BigInt(currentExps.worldIdExpiration) : 0n,
+    kybExpiration: nextKybExpiration,
     riskScore: currentRiskScore > 0 ? currentRiskScore : 0,
     subjectType: currentSubjectType > 0 ? currentSubjectType : 1,
     refHash

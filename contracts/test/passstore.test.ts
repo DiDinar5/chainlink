@@ -245,6 +245,43 @@ describe("PassStore MVP", function () {
     ).to.emit(assetRegistry, "AssetVerified");
   });
 
+  it("tracks separate expirations for KYC and KYB", async () => {
+    const { user, issuer, registry } = await deployFixture();
+    const now = Math.floor(Date.now() / 1000);
+
+    await (
+      await registry.connect(issuer).attestV2(user.address, {
+        flags: 1n,
+        humanExpiration: BigInt(now + 3600),
+        worldIdExpiration: 0n,
+        kybExpiration: 0n,
+        riskScore: 10,
+        subjectType: 1,
+        refHash: ethers.ZeroHash
+      })
+    ).wait();
+
+    await (
+      await registry.connect(issuer).attestV2(user.address, {
+        flags: 5n,
+        humanExpiration: BigInt(now + 3600),
+        worldIdExpiration: 0n,
+        kybExpiration: BigInt(now - 5),
+        riskScore: 10,
+        subjectType: 1,
+        refHash: ethers.id("kyb-expired")
+      })
+    ).wait();
+
+    const kycOnly = await registry.verifyUser(user.address, 0n);
+    expect(kycOnly[0]).to.equal(true);
+    expect(kycOnly[1]).to.equal(0n);
+
+    const kycKyb = await registry.verifyUser(user.address, 1n);
+    expect(kycKyb[0]).to.equal(false);
+    expect(kycKyb[1]).to.equal(3n);
+  });
+
   it("emits KYB and asset verification request events", async () => {
     const { user, broker } = await deployFixture();
 

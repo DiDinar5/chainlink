@@ -34,6 +34,22 @@ contract PassRegistry {
         bytes32 refHash;
     }
 
+    struct AttestationDataV2 {
+        uint256 flags;
+        uint64 humanExpiration;
+        uint64 worldIdExpiration;
+        uint64 kybExpiration;
+        uint32 riskScore;
+        uint8 subjectType;
+        bytes32 refHash;
+    }
+
+    struct VerificationExpirations {
+        uint64 humanExpiration;
+        uint64 worldIdExpiration;
+        uint64 kybExpiration;
+    }
+
     struct Policy {
         uint256 requiredFlags;
         uint32 maxRiskScore;
@@ -46,6 +62,7 @@ contract PassRegistry {
     uint256 public nextPolicyId;
 
     mapping(address => Attestation) public attestations;
+    mapping(address => VerificationExpirations) public verificationExpirations;
     mapping(uint256 => Policy) public policies;
     mapping(address => bool) public isIssuer;
 
@@ -158,35 +175,20 @@ contract PassRegistry {
     }
 
     function attest(address user, AttestationData calldata data) external onlyIssuer {
-        if ((data.flags & FLAG_KYB) == FLAG_KYB) {
-            Attestation memory current = attestations[user];
-            bool hasActiveKyc = current.exists &&
-                !current.revoked &&
-                (current.flags & FLAG_HUMAN) == FLAG_HUMAN &&
-                (current.expiration == 0 || current.expiration >= block.timestamp);
-            require(hasActiveKyc, "PassRegistry: kyb requires active kyc");
-        }
-
-        attestations[user] = Attestation({
+        AttestationDataV2 memory normalized = AttestationDataV2({
             flags: data.flags,
-            expiration: data.expiration,
+            humanExpiration: (data.flags & FLAG_HUMAN) == FLAG_HUMAN ? data.expiration : 0,
+            worldIdExpiration: (data.flags & FLAG_WORLD_ID) == FLAG_WORLD_ID ? data.expiration : 0,
+            kybExpiration: (data.flags & FLAG_KYB) == FLAG_KYB ? data.expiration : 0,
             riskScore: data.riskScore,
             subjectType: data.subjectType,
-            refHash: data.refHash,
-            updatedAt: uint64(block.timestamp),
-            revoked: false,
-            exists: true
+            refHash: data.refHash
         });
+        _attestV2(user, normalized);
+    }
 
-        emit Attested(
-            user,
-            data.flags,
-            data.expiration,
-            data.riskScore,
-            data.subjectType,
-            data.refHash,
-            msg.sender
-        );
+    function attestV2(address user, AttestationDataV2 calldata data) external onlyIssuer {
+        _attestV2(user, data);
     }
 
     function revoke(address user) external onlyIssuerOrAdmin {
@@ -214,12 +216,15 @@ contract PassRegistry {
             return (false, REASON_REVOKED);
         }
 
-        if (policy.requireUnexpired && a.expiration != 0 && a.expiration < block.timestamp) {
-            return (false, REASON_EXPIRED);
-        }
-
         if ((a.flags & policy.requiredFlags) != policy.requiredFlags) {
             return (false, REASON_FLAGS_MISSING);
+        }
+
+        if (policy.requireUnexpired) {
+            VerificationExpirations memory exps = verificationExpirations[user];
+            if (_hasExpiredRequiredFlag(a, exps, policy.requiredFlags)) {
+                return (false, REASON_EXPIRED);
+            }
         }
 
         if (policy.maxRiskScore > 0 && a.riskScore > policy.maxRiskScore) {
@@ -231,5 +236,122 @@ contract PassRegistry {
         }
 
         return (true, REASON_OK);
+    }
+
+    function _attestV2(address user, AttestationDataV2 memory data) internal {
+        if ((data.flags & FLAG_KYB) == FLAG_KYB) {
+            Attestation memory current = attestations[user];
+            VerificationExpirations memory currentExps = verificationExpirations[user];
+            bool hasActiveKyc = _isFlagActive(current, currentExps, FLAG_HUMAN);
+            require(hasActiveKyc, "PassRegistry: kyb requires active kyc");
+        }
+
+        VerificationExpirations memory nextExps = VerificationExpirations({
+            humanExpiration: (data.flags & FLAG_HUMAN) == FLAG_HUMAN ? data.humanExpiration : 0,
+            worldIdExpiration: (data.flags & FLAG_WORLD_ID) == FLAG_WORLD_ID ? data.worldIdExpiration : 0,
+            kybExpiration: (data.flags & FLAG_KYB) == FLAG_KYB ? data.kybExpiration : 0
+        });
+
+        verificationExpirations[user] = nextExps;
+
+        uint64 aggregateExpiration = _aggregateExpiration(data.flags, nextExps);
+        attestations[user] = Attestation({
+            flags: data.flags,
+            expiration: aggregateExpiration,
+            riskScore: data.riskScore,
+            subjectType: data.subjectType,
+            refHash: data.refHash,
+            updatedAt: uint64(block.timestamp),
+            revoked: false,
+            exists: true
+        });
+
+        emit Attested(
+            user,
+            data.flags,
+            aggregateExpiration,
+            data.riskScore,
+            data.subjectType,
+            data.refHash,
+            msg.sender
+        );
+    }
+
+    function _isFlagActive(
+        Attestation memory att,
+        VerificationExpirations memory exps,
+        uint256 flag
+    ) internal view returns (bool) {
+        if (!att.exists || att.revoked || (att.flags & flag) != flag) {
+            return false;
+        }
+
+        uint64 expiration = _flagExpiration(exps, flag);
+        return expiration == 0 || expiration >= block.timestamp;
+    }
+
+    function _hasExpiredRequiredFlag(
+        Attestation memory att,
+        VerificationExpirations memory exps,
+        uint256 requiredFlags
+    ) internal view returns (bool) {
+        if ((requiredFlags & FLAG_HUMAN) == FLAG_HUMAN && !_isFlagUnexpired(att, exps, FLAG_HUMAN)) {
+            return true;
+        }
+
+        if ((requiredFlags & FLAG_WORLD_ID) == FLAG_WORLD_ID && !_isFlagUnexpired(att, exps, FLAG_WORLD_ID)) {
+            return true;
+        }
+
+        if ((requiredFlags & FLAG_KYB) == FLAG_KYB && !_isFlagUnexpired(att, exps, FLAG_KYB)) {
+            return true;
+        }
+
+        // Fallback for custom/unknown flags that still rely on the legacy aggregate expiration.
+        uint256 knownFlags = FLAG_HUMAN | FLAG_WORLD_ID | FLAG_KYB;
+        if ((requiredFlags & ~knownFlags) != 0) {
+            return att.expiration != 0 && att.expiration < block.timestamp;
+        }
+
+        return false;
+    }
+
+    function _isFlagUnexpired(
+        Attestation memory att,
+        VerificationExpirations memory exps,
+        uint256 flag
+    ) internal view returns (bool) {
+        if ((att.flags & flag) != flag) {
+            return false;
+        }
+        uint64 expiration = _flagExpiration(exps, flag);
+        return expiration == 0 || expiration >= block.timestamp;
+    }
+
+    function _flagExpiration(VerificationExpirations memory exps, uint256 flag) internal pure returns (uint64) {
+        if (flag == FLAG_HUMAN) {
+            return exps.humanExpiration;
+        }
+        if (flag == FLAG_WORLD_ID) {
+            return exps.worldIdExpiration;
+        }
+        if (flag == FLAG_KYB) {
+            return exps.kybExpiration;
+        }
+        return 0;
+    }
+
+    function _aggregateExpiration(uint256 flags, VerificationExpirations memory exps) internal pure returns (uint64) {
+        uint64 result = 0;
+        if ((flags & FLAG_HUMAN) == FLAG_HUMAN && exps.humanExpiration > result) {
+            result = exps.humanExpiration;
+        }
+        if ((flags & FLAG_WORLD_ID) == FLAG_WORLD_ID && exps.worldIdExpiration > result) {
+            result = exps.worldIdExpiration;
+        }
+        if ((flags & FLAG_KYB) == FLAG_KYB && exps.kybExpiration > result) {
+            result = exps.kybExpiration;
+        }
+        return result;
     }
 }
