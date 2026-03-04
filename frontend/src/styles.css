@@ -154,7 +154,7 @@ textarea {
 
 .hero-assets-pie-ring {
   --pie-pct: 0;
-  --hero-pie-fill: #16a34a;
+  --hero-pie-fill: #ea580c;
   position: relative;
   width: 4.2rem;
   height: 4.2rem;
@@ -3159,7 +3159,7 @@ body .hero-assets-pie {
 }
 
 body .hero-assets-pie-ring {
-  --hero-pie-fill: #4ade80;
+  --hero-pie-fill: #fb923c;
 }
 
 body .hero-assets-pie-ring::before {
