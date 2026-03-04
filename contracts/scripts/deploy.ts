@@ -3,8 +3,19 @@ import * as dotenv from "dotenv";
 
 dotenv.config();
 
+/** Hardhat provider does not implement resolveName; ethers v6 calls it for address params. */
+function patchProviderResolveName(
+  provider: { resolveName?(name: string): Promise<string | null> }
+) {
+  provider.resolveName = async (name: string): Promise<string | null> => {
+    if (typeof name === "string" && /^0x[0-9a-fA-F]{40}$/.test(name)) return name;
+    return null;
+  };
+}
+
 async function main() {
   const [deployer] = await ethers.getSigners();
+  if (deployer.provider) patchProviderResolveName(deployer.provider);
   const creIssuer = process.env.CRE_ISSUER;
 
   console.log("Deployer:", deployer.address);

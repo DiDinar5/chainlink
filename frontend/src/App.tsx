@@ -62,6 +62,41 @@ type BuyerVerificationRequirement = "open" | "kyc" | "worldid" | "kyc_worldid";
 type AppTab = "assets" | "personal" | "business" | "checkers" | "integrations";
 type UiTheme = "light" | "dark";
 
+type CatalogNetwork = {
+  name: string;
+  explorer: string;
+  usdx: string;
+  rwa1155: string;
+  routerAndDelivery: string;
+  minterRole: string;
+  faucet: string;
+};
+
+type CatalogAsset = {
+  chainId: number;
+  contract: string;
+  tokenId: number;
+  name: string;
+  subname: string;
+  description: string;
+  category: string;
+  healthScore: number;
+  priceUSDx: number;
+  image: string;
+  supplyForDemo: number;
+  issuer_score?: number;
+  asset_url?: string;
+  icon?: string;
+  apr?: number | boolean;
+  liquidity?: string;
+  options?: unknown[];
+};
+
+type CatalogData = {
+  networks: Record<string, CatalogNetwork>;
+  assets: CatalogAsset[];
+};
+
 type NetworkOption = {
   chainId: number;
   label: string;
@@ -266,20 +301,6 @@ function buyerVerificationRequirementLabel(value: BuyerVerificationRequirement):
   }
 }
 
-function buyerVerificationRequirementHelpText(value: BuyerVerificationRequirement): string {
-  switch (value) {
-    case "kyc":
-      return "KYC required to buy";
-    case "worldid":
-      return "World ID required to buy";
-    case "kyc_worldid":
-      return "KYC + World ID required to buy";
-    case "open":
-    default:
-      return "No verification required to buy";
-  }
-}
-
 function buyerVerificationRequirementSatisfied(
   requirement: BuyerVerificationRequirement,
   hasKyc: boolean,
@@ -296,6 +317,44 @@ function buyerVerificationRequirementSatisfied(
     default:
       return true;
   }
+}
+
+function buyerVerificationRequirementHelpText(value: BuyerVerificationRequirement): string {
+  switch (value) {
+    case "kyc":
+      return "KYC required to buy";
+    case "worldid":
+      return "World ID required to buy";
+    case "kyc_worldid":
+      return "KYC + World ID required to buy";
+    case "open":
+    default:
+      return "No verification required to buy";
+  }
+}
+
+function getNetworkIconPath(chainId: number): string {
+  switch (chainId) {
+    case 11155111:
+      return "/eth.svg";
+    case 80002:
+      return "/pol.svg";
+    case 97:
+      return "/bsc.svg";
+    case 421614:
+    case 42161:
+      return "/arb.svg";
+    default:
+      return "/eth.svg";
+  }
+}
+
+function assetVerificationRequirement(asset: CatalogAsset): BuyerVerificationRequirement {
+  const seed = `${asset.chainId}-${asset.tokenId}-${asset.name}`;
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h << 5) - h + seed.charCodeAt(i);
+  const n = Math.abs(h) % 3;
+  return n === 0 ? "kyc" : n === 1 ? "worldid" : "kyc_worldid";
 }
 
 function buyerVerificationRequirementBadgeClass(value: BuyerVerificationRequirement): "ok" | "neutral" | "warn" {
@@ -1530,7 +1589,7 @@ export default function App() {
   const [verifiedAssets, setVerifiedAssets] = useState<VerifiedAssetCard[]>([]);
   const [resolvedAssetMetadataByUri, setResolvedAssetMetadataByUri] = useState<Record<string, ResolvedAssetMetadataSnapshot>>({});
   const [refreshingAssets, setRefreshingAssets] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<AppTab>("assets");
+  const [activeTab, setActiveTab] = useState<AppTab>("personal");
   const [assetsViewMode, setAssetsViewMode] = useState<AssetsViewMode>("all");
   const [integrationUserQuery, setIntegrationUserQuery] = useState<string>("");
   const [integrationUserChecking, setIntegrationUserChecking] = useState<boolean>(false);
@@ -1544,6 +1603,13 @@ export default function App() {
   const [integrationAssetsRequested, setIntegrationAssetsRequested] = useState<boolean>(false);
   const [integrationAssetsLoading, setIntegrationAssetsLoading] = useState<boolean>(false);
   const [integrationAssetsResponse, setIntegrationAssetsResponse] = useState<unknown | null>(null);
+  const [catalogData, setCatalogData] = useState<CatalogData | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState<boolean>(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [assetsCatalogCategory, setAssetsCatalogCategory] = useState<string>("all");
+  const [selectedCatalogAsset, setSelectedCatalogAsset] = useState<CatalogAsset | null>(null);
+  const [assetDetailTab, setAssetDetailTab] = useState<"price" | "description" | "documents">("description");
+  const [assetDetailAmount, setAssetDetailAmount] = useState<string>("1");
   const [uiTheme, setUiTheme] = useState<UiTheme>(() => {
     if (typeof window === "undefined") {
       return "dark";
@@ -1582,6 +1648,54 @@ export default function App() {
     }
     return new JsonRpcProvider(env.rpcUrl);
   }, []);
+
+  const baseCatalogAssets: CatalogAsset[] = catalogData?.assets ?? [];
+  const verifiedCatalogAssets: CatalogAsset[] = useMemo(() => {
+    if (!catalogData) {
+      return [];
+    }
+    const items: CatalogAsset[] = [];
+    for (const card of verifiedAssets) {
+      for (const deployment of card.deployments) {
+        const existing = baseCatalogAssets.find(
+          (asset) =>
+            asset.chainId === deployment.chainId &&
+            asset.contract.toLowerCase() === deployment.tokenAddress.toLowerCase() &&
+            asset.tokenId === deployment.tokenId
+        );
+        if (existing) {
+          continue;
+        }
+        const meta = resolvedAssetMetadataByUri[card.metadataUri];
+        const description = meta?.description || "";
+        const name = meta?.name || card.name;
+        const subname = card.companyLegalName || card.companyRef || "Verified issuer";
+        const image =
+          meta?.inlineImageDataUrl ||
+          meta?.imageHttpUrl ||
+          "";
+        items.push({
+          chainId: deployment.chainId,
+          contract: deployment.tokenAddress,
+          tokenId: deployment.tokenId,
+          name,
+          subname,
+          description,
+          category: "Verified",
+          healthScore: 80,
+          priceUSDx: 0,
+          image,
+          supplyForDemo: 0
+        });
+      }
+    }
+    return items;
+  }, [catalogData, verifiedAssets, resolvedAssetMetadataByUri, baseCatalogAssets]);
+
+  const catalogAssetsCombined: CatalogAsset[] = useMemo(
+    () => [...baseCatalogAssets, ...verifiedCatalogAssets],
+    [baseCatalogAssets, verifiedCatalogAssets]
+  );
 
   useEffect(() => {
     sessionSecretKeyRef.current = sessionSecretKeyHex;
@@ -1838,6 +1952,30 @@ export default function App() {
       setAssetsViewMode("all");
     }
   }, [assetsViewMode, account]);
+
+  useEffect(() => {
+    if (catalogData !== null) {
+      return;
+    }
+    setCatalogLoading(true);
+    setCatalogError(null);
+    fetch("/data/assets.json")
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error("Failed to load assets catalog");
+        }
+        return res.json() as Promise<CatalogData>;
+      })
+      .then((data) => {
+        setCatalogData(data);
+      })
+      .catch((err: Error) => {
+        setCatalogError(err.message ?? "Failed to load catalog");
+      })
+      .finally(() => {
+        setCatalogLoading(false);
+      });
+  }, [catalogData]);
 
   useEffect(() => {
     if (activeTab !== "assets") {
@@ -3547,22 +3685,42 @@ export default function App() {
     hasKybFlag && (verificationExpirations.kybExpiration === 0 || verificationExpirations.kybExpiration >= nowTs);
 
   const kybStatusLabel =
-    kybStubStatus === "verified" ? "Verified" : kybStubStatus === "in_review" ? "In review" : "Not started";
+    kybStubStatus === "verified" ? "Verified" : "Not verified";
   const kybCompanyLinked = hasActiveKybFlag && Boolean(kybCompanyProfile);
   const nextGeneratedPresetName =
     GENERATED_ASSET_PRESETS.length > 0
       ? GENERATED_ASSET_PRESETS[generatedPresetCursor % GENERATED_ASSET_PRESETS.length].name
       : "Preset";
 
-  const kycQuickLabel = verify.ok ? "Verified" : hasSdkToken ? "In progress" : "Pending";
-  const kycQuickBadgeClass = verify.ok ? "ok" : hasSdkToken ? "neutral" : "warn";
-  const worldIdQuickLabel = worldIdVerified ? "Verified" : "Pending";
+  const kycQuickLabel = verify.ok ? "Verified" : "Not verified";
+  const kycQuickBadgeClass = verify.ok ? "ok" : "warn";
+  const worldIdQuickLabel = worldIdVerified ? "Verified" : "Not verified";
   const worldIdQuickBadgeClass = worldIdVerified ? "ok" : "warn";
-  const kybQuickLabel = hasActiveKybFlag ? "Verified" : kybStatusLabel;
-  const kybQuickBadgeClass = hasActiveKybFlag ? "ok" : kybStubStatus === "in_review" ? "neutral" : "warn";
-  const kycQuickExpLabel = hasKycFlag ? formatUnixTimestamp(verificationExpirations.humanExpiration) : "-";
-  const worldIdQuickExpLabel = hasWorldIdFlag ? formatUnixTimestamp(verificationExpirations.worldIdExpiration) : "-";
-  const kybQuickExpLabel = hasKybFlag ? formatUnixTimestamp(verificationExpirations.kybExpiration) : "-";
+  const kybQuickLabel = hasActiveKybFlag ? "Verified" : "Not verified";
+  const kybQuickBadgeClass = hasActiveKybFlag ? "ok" : "warn";
+
+  const availableAssetsBase = 3;
+  const availableAssetsKyc = 10;
+  const availableAssetsWorldId = 2;
+  const availableAssetsKyb = 3;
+  const availableAssetsMax = availableAssetsBase + availableAssetsKyc + availableAssetsWorldId + availableAssetsKyb;
+  const availableAssetsCount =
+    availableAssetsBase +
+    (verify.ok ? availableAssetsKyc : 0) +
+    (worldIdVerified ? availableAssetsWorldId : 0) +
+    (hasActiveKybFlag ? availableAssetsKyb : 0);
+  const availableAssetsPercent = availableAssetsMax > 0 ? Math.round((availableAssetsCount / availableAssetsMax) * 100) : 0;
+
+  const catalogTotalAssets = catalogAssetsCombined.length;
+  const catalogAvailableCount = catalogAssetsCombined.filter((asset) =>
+    buyerVerificationRequirementSatisfied(assetVerificationRequirement(asset), verify.ok, worldIdVerified)
+  ).length;
+  const catalogAvailablePercent =
+    catalogTotalAssets > 0 ? Math.round((catalogAvailableCount / catalogTotalAssets) * 100) : 0;
+  const pieCount = catalogTotalAssets > 0 ? catalogAvailableCount : availableAssetsCount;
+  const pieTotal = catalogTotalAssets > 0 ? catalogTotalAssets : availableAssetsMax;
+  const piePercent = catalogTotalAssets > 0 ? catalogAvailablePercent : availableAssetsPercent;
+
   const kybActionCompleted = hasActiveKybFlag || kybStubStatus === "verified";
   const kybCompanyProfileVisible = kybActionCompleted;
   const kybActionLabel = kybActionCompleted ? "Completed" : kybStubStatus === "in_review" ? "Approve KYB" : "Start KYB";
@@ -4027,18 +4185,15 @@ export default function App() {
           <button className="btn primary" onClick={connectWallet} disabled={busy}>
             {walletButtonLabel}
           </button>
-          <div className="hero-verify-pills" aria-label="Verification summary">
-            <span className={`pill hero-verify-pill ${kycQuickBadgeClass}`}>
-              <span className="hero-verify-pill-label">KYC: {kycQuickLabel}</span>
-              <span className="hero-verify-pill-exp">Exp: {kycQuickExpLabel}</span>
-            </span>
-            <span className={`pill hero-verify-pill ${worldIdQuickBadgeClass}`}>
-              <span className="hero-verify-pill-label">World ID: {worldIdQuickLabel}</span>
-              <span className="hero-verify-pill-exp">Exp: {worldIdQuickExpLabel}</span>
-            </span>
-            <span className={`pill hero-verify-pill ${kybQuickBadgeClass}`}>
-              <span className="hero-verify-pill-label">KYB: {kybQuickLabel}</span>
-              <span className="hero-verify-pill-exp">Exp: {kybQuickExpLabel}</span>
+          <div className="hero-assets-pie" aria-label="Available assets">
+            <div
+              className="hero-assets-pie-ring"
+              style={{ ["--pie-pct" as string]: `${piePercent}` }}
+            >
+              <span className="hero-assets-pie-value">{pieCount}</span>
+            </div>
+            <span className="hero-assets-pie-label">
+              Available assets{catalogTotalAssets > 0 ? ` (${pieCount}/${catalogTotalAssets})` : ""}
             </span>
           </div>
         </div>
@@ -4047,20 +4202,20 @@ export default function App() {
       <section className="card section-tabs-card" aria-label="Console sections">
         <div className="section-tabs">
           <button
+            className={`section-tab ${activeTab === "personal" ? "active" : ""}`}
+            onClick={() => setActiveTab("personal")}
+            aria-pressed={activeTab === "personal"}
+            type="button"
+          >
+            <span>Pass Portal</span>
+          </button>
+          <button
             className={`section-tab ${activeTab === "assets" ? "active" : ""}`}
             onClick={() => setActiveTab("assets")}
             aria-pressed={activeTab === "assets"}
             type="button"
           >
             <span>Assets</span>
-          </button>
-          <button
-            className={`section-tab ${activeTab === "personal" ? "active" : ""}`}
-            onClick={() => setActiveTab("personal")}
-            aria-pressed={activeTab === "personal"}
-            type="button"
-          >
-            <span>Personal</span>
           </button>
           <button
             className={`section-tab ${activeTab === "business" ? "active" : ""}`}
@@ -4320,27 +4475,27 @@ export default function App() {
       ) : null}
 
       {activeTab === "personal" || activeTab === "business" ? (
-      <section className="tab-section-group" aria-label={activeTab === "personal" ? "Personal verifications" : "Business verification"}>
+      <section className="tab-section-group" aria-label={activeTab === "personal" ? "Pass Portal" : "Business verification"}>
       <div className="queue-head tab-section-head">
-        <h3>{activeTab === "personal" ? "Personal Verifications" : "Business Verification"}</h3>
+        <h3>{activeTab === "personal" ? "Pass Portal" : "Business Verification"}</h3>
       </div>
-      <section className="grid two">
+      <section className="pass-portal-cards">
         {activeTab === "personal" ? (
         <article className="card wallet-card">
           <div className="card-head">
             <h2>KYC</h2>
-            <span className={`badge ${verify.ok ? "ok" : hasSdkToken || waitingPacket ? "neutral" : "warn"}`}>
-              {verify.ok ? "Verified" : hasSdkToken || waitingPacket ? "In progress" : "Pending"}
+            <span className={`badge ${kycQuickBadgeClass}`}>
+              {kycQuickLabel}
             </span>
           </div>
 
           <p className="card-text">
-            Complete KYC to unlock business verification and asset submissions in the marketplace flow.
+            Standard identity check with government ID and face verification. Unlocks majority of regulated asset classes.
           </p>
 
           <div className="wallet-actions">
             <button
-              className="btn primary"
+              className="btn primary btn-slim"
               onClick={() => void goToKyc()}
               disabled={busy || !account || networkMismatch || waitingPacket || verify.ok}
             >
@@ -4348,56 +4503,22 @@ export default function App() {
             </button>
           </div>
 
-          <dl className="kyc-kv-grid">
-            <div>
-              <dt>Address</dt>
-              <dd>{walletLabel}</dd>
-            </div>
-            <div>
-              <dt>Network</dt>
-              <dd className={networkMismatch ? "text-warn" : ""}>Chain {chainLabel}</dd>
-            </div>
-            <div>
-              <dt>Policy</dt>
-              <dd>{verify.ok ? "Pass" : `Blocked (${reasonLabel(verify.reason)})`}</dd>
-            </div>
-            <div>
-              <dt>Encryption</dt>
-              <dd>{encryptionReady ? "Ready" : "Missing"}</dd>
-            </div>
-            <div>
-              <dt>Request ID</dt>
-              <dd>{requestId}</dd>
-            </div>
-            <div>
-              <dt>SDK packet</dt>
-              <dd>{sdkPacketStageLabel}</dd>
-            </div>
-            <div>
-              <dt>Packet exp</dt>
-              <dd>{sdkPacketExpiryLabel}</dd>
-            </div>
-            <div>
-              <dt>SDK token</dt>
-              <dd className="mono">{sdkTokenPreview}</dd>
-            </div>
-            <div className="kyc-kv-full">
-              <dt>CRE issuer</dt>
-              <dd>{creIssuerAllowed === null ? "-" : creIssuerAllowed ? "allowed" : "not allowed"}</dd>
-            </div>
-          </dl>
+          <div className="pass-portal-meta">
+            <span>Expire: {verificationExpirations.humanExpiration > 0 ? formatUnixTimestamp(verificationExpirations.humanExpiration) : "—"}</span>
+            <span>Provider: SumSub</span>
+          </div>
         </article>
         ) : null}
 
         {activeTab === "personal" ? (
         <article className="card worldid-card">
           <div className="card-head">
-            <h2>World ID Gate</h2>
-            <span className={`badge ${worldIdVerified ? "ok" : "warn"}`}>{worldIdVerified ? "Linked" : "Not linked"}</span>
+            <h2>Proof of Human</h2>
+            <span className={`badge ${worldIdQuickBadgeClass}`}>{worldIdQuickLabel}</span>
           </div>
 
           <p className="card-text">
-            Use this as second verification provider in parallel with KYC. In staging, simulator proofs are expected.
+            Human-Centric Finance. Verify your uniqueness using World ID. Unlock specialized rewards and governance rights.
           </p>
 
           {worldIdConfigured ? (
@@ -4412,7 +4533,7 @@ export default function App() {
             >
               {({ open: openIdKit }: { open: () => void }) => (
                 <button
-                  className="btn primary"
+                  className="btn primary btn-slim"
                   onClick={openIdKit}
                   disabled={busy || !account || networkMismatch || worldIdVerified}
                 >
@@ -4421,7 +4542,7 @@ export default function App() {
               )}
             </IDKitWidget>
           ) : (
-            <button className="btn" disabled>
+            <button className="btn btn-slim" disabled>
               Configure World ID env first
             </button>
           )}
@@ -4430,11 +4551,88 @@ export default function App() {
             <p className="hint">Set `VITE_WORLD_ID_APP_ID` and `VITE_WORLD_ID_ACTION` in `frontend/.env`.</p>
           ) : null}
 
-          <div className="worldid-meta">
-            <span>Precheck mode: {worldIdPrecheckMode}</span>
-            {worldIdErrorCode ? <span className="text-warn">Error code: {worldIdErrorCode}</span> : null}
+          <div className="pass-portal-meta">
+            <span>Expire: {verificationExpirations.worldIdExpiration > 0 ? formatUnixTimestamp(verificationExpirations.worldIdExpiration) : "—"}</span>
+            <span>Provider: World ID</span>
           </div>
         </article>
+        ) : null}
+
+        {activeTab === "personal" ? (
+        <>
+          <article className="card wallet-card">
+            <div className="card-head">
+              <h2>Social Identity (LinkedIn)</h2>
+              <span className="badge warn">Not verified</span>
+            </div>
+            <p className="card-text">
+              Trust through Transparency. Link LinkedIn profiles to build on-chain social credit.
+            </p>
+            <div className="pass-portal-meta">
+              <span>Expire: —</span>
+              <span>Provider: LinkedIn</span>
+            </div>
+            <div className="wallet-actions">
+              <button className="btn primary btn-slim" type="button" onClick={() => setStatus("Social Identity (LinkedIn) verification — coming soon.")}>
+                Verify
+              </button>
+            </div>
+          </article>
+          <article className="card wallet-card">
+            <div className="card-head">
+              <h2>Social Identity (X.com)</h2>
+              <span className="badge warn">Not verified</span>
+            </div>
+            <p className="card-text">
+              Trust through Transparency. Link X.com profiles to build on-chain social credit.
+            </p>
+            <div className="pass-portal-meta">
+              <span>Expire: —</span>
+              <span>Provider: X.com</span>
+            </div>
+            <div className="wallet-actions">
+              <button className="btn primary btn-slim" type="button" onClick={() => setStatus("Social Identity (X.com) verification — coming soon.")}>
+                Verify
+              </button>
+            </div>
+          </article>
+          <article className="card wallet-card">
+            <div className="card-head">
+              <h2>Address Verification</h2>
+              <span className="badge warn">Not verified</span>
+            </div>
+            <p className="card-text">
+              Local Compliance. Confirm physical address for regional jurisdictional and tax standards.
+            </p>
+            <div className="pass-portal-meta">
+              <span>Expire: —</span>
+              <span>Provider: SumSub</span>
+            </div>
+            <div className="wallet-actions">
+              <button className="btn primary btn-slim" type="button" onClick={() => setStatus("Address verification — coming soon.")}>
+                Verify
+              </button>
+            </div>
+          </article>
+          <article className="card wallet-card">
+            <div className="card-head">
+              <h2>Qualified Investor</h2>
+              <span className="badge warn">Not verified</span>
+            </div>
+            <p className="card-text">
+              Unlock the high-alpha market. Reserved for Accredited (US) and Professional (EU) investors. PE, VC, and Hedge Funds.
+            </p>
+            <div className="pass-portal-meta">
+              <span>Expire: —</span>
+              <span>Provider: Multiple</span>
+            </div>
+            <div className="wallet-actions">
+              <button className="btn primary btn-slim" type="button" onClick={() => setStatus("Qualified Investor verification — coming soon.")}>
+                Verify
+              </button>
+            </div>
+          </article>
+        </>
         ) : null}
 
         {activeTab === "business" ? (
@@ -4455,7 +4653,7 @@ export default function App() {
             <div className="kyb-company-box">
               <div className="kyb-company-head">
                 <strong>KYB Company Profile</strong>
-                {kybCompanyLinked ? <span className="badge ok">Linked</span> : null}
+                {kybCompanyLinked ? <span className="badge ok">Verified</span> : null}
               </div>
               <div className="kyb-company-grid">
                 <label>
@@ -4541,8 +4739,267 @@ export default function App() {
       </section>
       ) : null}
 
-      {activeTab === "assets" || activeTab === "business" ? (
-      <section className={`card registry-card${activeTab === "assets" ? " registry-card-assets" : ""}`}>
+      {activeTab === "assets" ? (
+      <section className="tab-section-group assets-catalog-section" aria-label="Assets catalog">
+        <div className="queue-head tab-section-head">
+          <h3>Assets</h3>
+        </div>
+        {catalogLoading ? (
+          <p className="empty-state">Loading assets catalog…</p>
+        ) : catalogError ? (
+          <p className="empty-state text-warn">{catalogError}</p>
+        ) : catalogData ? (
+          selectedCatalogAsset ? (
+            <div className="asset-detail-view">
+              <button
+                type="button"
+                className="asset-detail-back"
+                onClick={() => setSelectedCatalogAsset(null)}
+              >
+                ← Back to Marketplace
+              </button>
+              <div className="asset-detail-main">
+                <div className="asset-detail-hero asset-detail-hero-small">
+                  <div className="asset-detail-hero-media">
+                    <img
+                      src={selectedCatalogAsset.image}
+                      alt=""
+                      onError={(e: SyntheticEvent<HTMLImageElement>) => {
+                        e.currentTarget.style.display = "none";
+                      }}
+                    />
+                  </div>
+                  <div className="asset-detail-trust-badge">
+                    Trust Score: {selectedCatalogAsset.healthScore}/100
+                  </div>
+                </div>
+                <div className="asset-detail-panel card">
+                  <span className="badge neutral">{selectedCatalogAsset.category}</span>
+                  <h2 className="asset-detail-title">{selectedCatalogAsset.name}</h2>
+                  <p className="asset-detail-issuer">Issued by {selectedCatalogAsset.subname}</p>
+                  <div className="asset-detail-info-grid">
+                    <div className="asset-detail-info-box">
+                      <span className="asset-detail-info-label">Price per Token</span>
+                      <strong>{selectedCatalogAsset.priceUSDx} USDC</strong>
+                    </div>
+                    <div className="asset-detail-info-box highlight">
+                      <span className="asset-detail-info-label">Est. APR</span>
+                      <strong>
+                        {typeof selectedCatalogAsset.apr === "number"
+                          ? `${selectedCatalogAsset.apr}%`
+                          : "Variable"}
+                      </strong>
+                    </div>
+                  </div>
+                  <div className="asset-detail-amount-row">
+                    <label>
+                      <span className="asset-detail-info-label">Amount</span>
+                      <input
+                        type="number"
+                        min={1}
+                        value={assetDetailAmount}
+                        onChange={(e) => setAssetDetailAmount(e.target.value)}
+                      />
+                    </label>
+                    <span className="asset-detail-tokens-label">Tokens</span>
+                  </div>
+                  <p className="asset-detail-available">
+                    Available:{" "}
+                    {selectedCatalogAsset.supplyForDemo
+                      ? selectedCatalogAsset.supplyForDemo.toLocaleString()
+                      : "Unlimited"}
+                  </p>
+                  <p className="asset-detail-total">
+                    Total Cost:{" "}
+                    <strong>
+                      {(Number(assetDetailAmount) || 0) * selectedCatalogAsset.priceUSDx} USDC
+                    </strong>
+                  </p>
+                  <button
+                    type="button"
+                    className="btn primary asset-detail-buy-btn"
+                    onClick={() =>
+                      setStatus(`Buy ${assetDetailAmount} token(s) of ${selectedCatalogAsset.name} — coming soon.`)
+                    }
+                  >
+                    Buy Token
+                  </button>
+                  <div className="asset-detail-metadata-inline">
+                    <h3 className="asset-detail-metadata-title">Asset Metadata</h3>
+                    <dl className="asset-detail-metadata-dl">
+                      <div>
+                        <dt>Network</dt>
+                        <dd>{catalogData.networks[String(selectedCatalogAsset.chainId)]?.name ?? `Chain ${selectedCatalogAsset.chainId}`}</dd>
+                      </div>
+                      <div>
+                        <dt>Token Type</dt>
+                        <dd>ERC-1155</dd>
+                      </div>
+                      <div>
+                        <dt>Tokens Issued</dt>
+                        <dd>{selectedCatalogAsset.supplyForDemo ? selectedCatalogAsset.supplyForDemo.toLocaleString() : "Unlimited"}</dd>
+                      </div>
+                      <div>
+                        <dt>Contract</dt>
+                        <dd>
+                          <a href="#" onClick={(e) => e.preventDefault()}>
+                            {selectedCatalogAsset.contract
+                              ? `${selectedCatalogAsset.contract.slice(0, 6)}...${selectedCatalogAsset.contract.slice(-4)}`
+                              : "—"}
+                          </a>
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Attestation</dt>
+                        <dd>
+                          <a href="#" onClick={(e) => e.preventDefault()}>
+                            IPFS
+                          </a>
+                        </dd>
+                      </div>
+                    </dl>
+                  </div>
+                </div>
+              </div>
+              <div className="asset-detail-chart card">
+                <div className="asset-detail-chart-header">
+                  <div>
+                    <p className="asset-detail-chart-price">{selectedCatalogAsset.priceUSDx} USDC</p>
+                    <p className="asset-detail-chart-change">↑ +4.2% (Past Month)</p>
+                  </div>
+                  <div className="asset-detail-chart-ranges">
+                    {(["24h", "Week", "Month", "Year", "All time"] as const).map((range) => (
+                      <button key={range} type="button" className={range === "Month" ? "active" : ""}>
+                        {range}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="asset-detail-chart-placeholder" aria-hidden="true">
+                  <svg viewBox="0 0 400 120" preserveAspectRatio="none">
+                    <defs>
+                      <linearGradient id="chart-fill" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="rgb(34, 197, 94)" stopOpacity="0.4" />
+                        <stop offset="100%" stopColor="rgb(34, 197, 94)" stopOpacity="0" />
+                      </linearGradient>
+                    </defs>
+                    <path
+                      fill="url(#chart-fill)"
+                      d="M 0 100 Q 50 80 100 70 T 200 50 T 300 35 T 400 20 L 400 120 L 0 120 Z"
+                    />
+                    <path
+                      fill="none"
+                      stroke="rgb(34, 197, 94)"
+                      strokeWidth="2"
+                      d="M 0 100 Q 50 80 100 70 T 200 50 T 300 35 T 400 20"
+                    />
+                  </svg>
+                </div>
+              </div>
+            </div>
+          ) : (
+          <>
+            <div className="assets-catalog-filters" role="group" aria-label="Category filter">
+              <button
+                type="button"
+                className={`assets-catalog-filter-btn${assetsCatalogCategory === "all" ? " active" : ""}`}
+                onClick={() => setAssetsCatalogCategory("all")}
+              >
+                All
+              </button>
+              {Array.from(
+                new Set(catalogAssetsCombined.map((a) => a.category).filter(Boolean))
+              )
+                .sort((a, b) => a.localeCompare(b))
+                .map((cat) => (
+                  <button
+                    key={cat}
+                    type="button"
+                    className={`assets-catalog-filter-btn${assetsCatalogCategory === cat ? " active" : ""}`}
+                    onClick={() => setAssetsCatalogCategory(cat)}
+                  >
+                    {cat}
+                  </button>
+                ))}
+            </div>
+            <div className="assets-catalog-grid">
+              {catalogAssetsCombined
+                .filter(
+                  (asset) =>
+                    assetsCatalogCategory === "all" || asset.category === assetsCatalogCategory
+                )
+                .map((asset) => {
+                  const network = catalogData.networks[String(asset.chainId)];
+                  const networkName = network?.name ?? `Chain ${asset.chainId}`;
+                  const networkIconPath = getNetworkIconPath(asset.chainId);
+                  const requirement = assetVerificationRequirement(asset);
+                  const kycOk = verify.ok;
+                  const worldIdOk = worldIdVerified;
+                  const showKyc = requirement === "kyc" || requirement === "kyc_worldid";
+                  const showWorldId = requirement === "worldid" || requirement === "kyc_worldid";
+                  const kycBadgeClass = showKyc ? (kycOk ? "ok" : "warn") : "";
+                  const worldIdBadgeClass = showWorldId ? (worldIdOk ? "ok" : "warn") : "";
+                  return (
+                    <article
+                      key={`${asset.chainId}-${asset.contract}-${asset.tokenId}`}
+                      className="assets-catalog-card card"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setSelectedCatalogAsset(asset)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setSelectedCatalogAsset(asset);
+                        }
+                      }}
+                    >
+                      <div className="assets-catalog-card-media">
+                        <img
+                          src={asset.image}
+                          alt=""
+                          onError={(e: SyntheticEvent<HTMLImageElement>) => {
+                            const target = e.currentTarget;
+                            target.style.display = "none";
+                          }}
+                        />
+                        <span className="assets-catalog-card-network" title={networkName}>
+                          <img src={networkIconPath} alt="" width={24} height={24} />
+                        </span>
+                      </div>
+                      <div className="assets-catalog-card-body">
+                        <h3 className="assets-catalog-card-title">{asset.name}</h3>
+                        <p className="assets-catalog-card-subname">{asset.subname}</p>
+                        <div className="assets-catalog-card-verification">
+                          {showKyc ? (
+                            <span className={`badge ${kycBadgeClass}`}>KYC</span>
+                          ) : null}
+                          {showWorldId ? (
+                            <span className={`badge ${worldIdBadgeClass}`}>World ID</span>
+                          ) : null}
+                        </div>
+                        <button
+                          type="button"
+                          className="btn primary btn-slim"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setStatus(`Buy flow for ${asset.name} — coming soon.`);
+                          }}
+                        >
+                          Buy
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+            </div>
+          </>
+          )
+        ) : null}
+      </section>
+      ) : null}
+
+      {activeTab === "business" ? (
+      <section className="card registry-card">
         {activeTab === "business" ? (
           <>
           <div className="card-head">
@@ -4840,7 +5297,7 @@ export default function App() {
         </div>
         ) : null}
 
-        {activeTab === "assets" ? (
+        {activeTab === "assets" || activeTab === "business" ? (
         <div className="verified-wrap verified-wrap-assets">
           <div className="queue-head">
             <h3>Verified Assets</h3>
@@ -4887,7 +5344,7 @@ export default function App() {
             </div>
           </div>
 
-          {verifiedAssets.length === 0 ? (
+          {verifiedAssets.length === 0 && activeTab === "business" ? (
             <p className="empty-state">
               {wantsMineAssets
                 ? "No verified assets found for your wallet yet."
