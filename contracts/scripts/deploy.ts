@@ -1,7 +1,29 @@
 import { ethers } from "hardhat";
 import * as dotenv from "dotenv";
+import * as fs from "fs";
+import * as path from "path";
 
 dotenv.config();
+
+function updateEnvFile(filePath: string, updates: Record<string, string>): void {
+  let content = "";
+  if (fs.existsSync(filePath)) {
+    content = fs.readFileSync(filePath, "utf8");
+  }
+
+  for (const [key, value] of Object.entries(updates)) {
+    const regex = new RegExp(`^${key}=.*$`, "m");
+    const line = `${key}=${value}`;
+    if (regex.test(content)) {
+      content = content.replace(regex, line);
+    } else {
+      content = content.trimEnd() + "\n" + line + "\n";
+    }
+  }
+
+  fs.writeFileSync(filePath, content);
+  console.log(`Updated ${filePath}`);
+}
 
 /** Hardhat provider does not implement resolveName; ethers v6 calls it for address params. */
 function patchProviderResolveName(
@@ -84,19 +106,37 @@ async function main() {
   const claimDropAddress = await claimDrop.getAddress();
   console.log("ClaimDrop:", claimDropAddress);
 
-  console.log("\\nCopy these addresses to frontend/.env and cre/.env:");
-  console.log(`VITE_POLICY_ID=${kycPolicyId.toString()}`);
-  console.log(`VITE_KYB_POLICY_ID=${kybPolicyId.toString()}`);
-  console.log(`VITE_PASS_REGISTRY=${registryAddress}`);
-  console.log(`VITE_KYC_BROKER=${brokerAddress}`);
-  console.log(`VITE_ASSET_REGISTRY=${assetRegistryAddress}`);
-  console.log(`VITE_ACCESS_PASS=${accessPassAddress}`);
-  console.log(`VITE_CLAIM_DROP=${claimDropAddress}`);
-  console.log(`PASS_POLICY_ID=${kycPolicyId.toString()}`);
-  console.log(`KYB_POLICY_ID=${kybPolicyId.toString()}`);
-  console.log(`PASS_REGISTRY_ADDRESS=${registryAddress}`);
-  console.log(`KYC_BROKER_ADDRESS=${brokerAddress}`);
-  console.log(`ASSET_REGISTRY_ADDRESS=${assetRegistryAddress}`);
+  // Auto-update .env files with deployed addresses
+  const root = path.resolve(__dirname, "../..");
+
+  updateEnvFile(path.join(root, "contracts", ".env"), {
+    PASS_REGISTRY_ADDRESS: registryAddress,
+    KYC_BROKER_ADDRESS: brokerAddress,
+    ASSET_REGISTRY_ADDRESS: assetRegistryAddress,
+  });
+
+  updateEnvFile(path.join(root, "cre", ".env"), {
+    PASS_REGISTRY_ADDRESS: registryAddress,
+    KYC_BROKER_ADDRESS: brokerAddress,
+    ASSET_REGISTRY_ADDRESS: assetRegistryAddress,
+  });
+
+  updateEnvFile(path.join(root, "frontend", ".env"), {
+    VITE_POLICY_ID: kycPolicyId.toString(),
+    VITE_KYB_POLICY_ID: kybPolicyId.toString(),
+    VITE_PASS_REGISTRY: registryAddress,
+    VITE_KYC_BROKER: brokerAddress,
+    VITE_ASSET_REGISTRY: assetRegistryAddress,
+    VITE_ACCESS_PASS: accessPassAddress,
+    VITE_CLAIM_DROP: claimDropAddress,
+  });
+
+  console.log("\\nDeployed addresses written to .env files:");
+  console.log(`  PASS_REGISTRY=${registryAddress}`);
+  console.log(`  KYC_BROKER=${brokerAddress}`);
+  console.log(`  ASSET_REGISTRY=${assetRegistryAddress}`);
+  console.log(`  ACCESS_PASS=${accessPassAddress}`);
+  console.log(`  CLAIM_DROP=${claimDropAddress}`);
 }
 
 main().catch((error) => {

@@ -239,24 +239,35 @@ contract PassRegistry {
     }
 
     function _attestV2(address user, AttestationDataV2 memory data) internal {
+        Attestation memory existing = attestations[user];
+        VerificationExpirations memory existingExps = verificationExpirations[user];
+
         if ((data.flags & FLAG_KYB) == FLAG_KYB) {
-            Attestation memory current = attestations[user];
-            VerificationExpirations memory currentExps = verificationExpirations[user];
-            bool hasActiveKyc = _isFlagActive(current, currentExps, FLAG_HUMAN);
+            bool hasActiveKyc = _isFlagActive(existing, existingExps, FLAG_HUMAN);
             require(hasActiveKyc, "PassRegistry: kyb requires active kyc");
         }
 
+        // Merge flags: OR new flags with existing (additive)
+        uint256 mergedFlags = existing.exists ? (existing.flags | data.flags) : data.flags;
+
+        // Merge expirations: update only for flags being set, preserve others
         VerificationExpirations memory nextExps = VerificationExpirations({
-            humanExpiration: (data.flags & FLAG_HUMAN) == FLAG_HUMAN ? data.humanExpiration : 0,
-            worldIdExpiration: (data.flags & FLAG_WORLD_ID) == FLAG_WORLD_ID ? data.worldIdExpiration : 0,
-            kybExpiration: (data.flags & FLAG_KYB) == FLAG_KYB ? data.kybExpiration : 0
+            humanExpiration: (data.flags & FLAG_HUMAN) == FLAG_HUMAN
+                ? data.humanExpiration
+                : existingExps.humanExpiration,
+            worldIdExpiration: (data.flags & FLAG_WORLD_ID) == FLAG_WORLD_ID
+                ? data.worldIdExpiration
+                : existingExps.worldIdExpiration,
+            kybExpiration: (data.flags & FLAG_KYB) == FLAG_KYB
+                ? data.kybExpiration
+                : existingExps.kybExpiration
         });
 
         verificationExpirations[user] = nextExps;
 
-        uint64 aggregateExpiration = _aggregateExpiration(data.flags, nextExps);
+        uint64 aggregateExpiration = _aggregateExpiration(mergedFlags, nextExps);
         attestations[user] = Attestation({
-            flags: data.flags,
+            flags: mergedFlags,
             expiration: aggregateExpiration,
             riskScore: data.riskScore,
             subjectType: data.subjectType,
@@ -268,7 +279,7 @@ contract PassRegistry {
 
         emit Attested(
             user,
-            data.flags,
+            mergedFlags,
             aggregateExpiration,
             data.riskScore,
             data.subjectType,

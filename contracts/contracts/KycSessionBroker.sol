@@ -24,6 +24,7 @@ contract KycSessionBroker {
     mapping(address => uint256) public latestKycRequestId;
     mapping(address => bool) public hasKybRequest;
     mapping(address => uint256) public latestKybRequestId;
+    mapping(uint256 => address) public kybRequestOwner;
     mapping(address => uint64) public lastSyncRequestAt;
     mapping(uint256 => TokenPacket) private packets;
 
@@ -156,6 +157,7 @@ contract KycSessionBroker {
 
         hasKybRequest[msg.sender] = true;
         latestKybRequestId[msg.sender] = kybRequestId;
+        kybRequestOwner[kybRequestId] = msg.sender;
 
         emit KybRequested(kybRequestId, msg.sender, companyRef, jurisdiction);
     }
@@ -171,7 +173,7 @@ contract KycSessionBroker {
         string calldata metadataURI
     ) external returns (uint256 assetRequestId) {
         require(hasKybRequest[msg.sender], "KycSessionBroker: kyb required");
-        require(latestKybRequestId[msg.sender] >= kybRequestId, "KycSessionBroker: kyb request missing");
+        require(kybRequestOwner[kybRequestId] == msg.sender, "KycSessionBroker: not kyb owner");
         require(chainId > 0, "KycSessionBroker: invalid chain");
         require(tokenStandard > 0 && tokenStandard <= 4, "KycSessionBroker: invalid token standard");
         require(bytes(symbolOrName).length > 0, "KycSessionBroker: empty symbol/name");

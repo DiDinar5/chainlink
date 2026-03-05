@@ -18,3 +18,4 @@ DON_FILES/GO/.gocache
 DON_FILES/GO/.gomodcache
 DON_FILES/GO/.gopath
 run_ngrok_frontend.sh
+.deploy-done
