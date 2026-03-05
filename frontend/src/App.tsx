@@ -1652,6 +1652,8 @@ export default function App() {
   const [assetDetailTab, setAssetDetailTab] = useState<"price" | "description" | "documents">("description");
   const [assetDetailAmount, setAssetDetailAmount] = useState<string>("1");
   const [personalCardsView, setPersonalCardsView] = useState<"list" | "grid">("list");
+  const [assetRegistryIntakeVisible, setAssetRegistryIntakeVisible] = useState<boolean>(true);
+  const [statusLogVisible, setStatusLogVisible] = useState<boolean>(true);
   const { open } = useAppKit();
   const { address: appKitAddress, isConnected: isAppKitConnected } = useAppKitAccount({ namespace: "eip155" });
   const { walletProvider } = useAppKitProvider<WalletProviderLike>("eip155");
@@ -5161,17 +5163,28 @@ export default function App() {
           <>
           <div className="card-head">
             <h2>Asset Registry Intake</h2>
-            <span className={`badge ${verify.ok && hasActiveKybFlag ? "ok" : "warn"}`}>
-              {verify.ok && hasActiveKybFlag ? "Ready" : "Locked"}
-            </span>
+            <div className="card-head-badges">
+              <span className={`badge ${verify.ok && hasActiveKybFlag ? "ok" : "warn"}`}>
+                {verify.ok && hasActiveKybFlag ? "Ready" : "Locked"}
+              </span>
+              <button
+                type="button"
+                className="btn btn-slim registry-intake-toggle"
+                onClick={() => setAssetRegistryIntakeVisible((previous) => !previous)}
+              >
+                {assetRegistryIntakeVisible ? "Hide" : "Show"}
+              </button>
+            </div>
           </div>
+          {assetRegistryIntakeVisible ? (
           <p className="card-text">
             Add real assets here. Issuer company is pulled from KYB, metadata is uploaded to IPFS, then verification requests are sent onchain.
           </p>
+          ) : null}
           </>
         ) : null}
 
-        {activeTab === "business" ? (
+        {activeTab === "business" && assetRegistryIntakeVisible ? (
         <>
         {assetRegistryIntakeLocked ? <p className="registry-lock-note">{assetRegistryIntakeLockReason}</p> : null}
         <form className={`registry-form${assetRegistryIntakeLocked ? " registry-intake-disabled" : ""}`} onSubmit={publishAsset}>
@@ -5410,7 +5423,7 @@ export default function App() {
               No verified assets yet. Publish an asset above and wait for CRE to attest it in `AssetRegistry`.
             </p>
           ) : (
-            <div className="queue-table-wrap">
+            <div className="queue-table-wrap verified-list-table-wrap">
               <table className="queue-table verified-list-table">
                 <thead>
                   <tr>
@@ -5459,10 +5472,10 @@ export default function App() {
                   .join(" · ");
                 return (
                 <tr key={asset.groupId}>
-                  <td>
-                    <strong>{cardTitle}</strong>
-                    {cardDescription ? <div className="table-sub">{cardDescription}</div> : null}
-                    <div className="table-sub mono" title={asset.owner}>Owner: {shortAddress(asset.owner)}</div>
+                  <td className="verified-list-asset-cell">
+                    <strong className="verified-list-asset-title">{cardTitle}</strong>
+                    {cardDescription ? <div className="table-sub verified-list-asset-desc" title={cardDescription}>{cardDescription}</div> : null}
+                    <div className="table-sub mono verified-list-asset-owner" title={asset.owner}>Owner: {shortAddress(asset.owner)}</div>
                   </td>
                   <td>
                     <span className={`pill ${buyerVerificationRequirementBadgeClass(buyerRequirement)}`}>{buyerRequirementLabel}</span>
@@ -5479,19 +5492,31 @@ export default function App() {
                   <td>{cardMaxSupply}</td>
                   <td>{cardMinPrice === "-" ? "-" : `$${cardMinPrice}`}</td>
                   <td>
-                    <div className="queue-deployments">
+                    <div className="verified-list-network-icons">
                       {asset.deployments.map((deployment) => {
-                        const chainLabel = `${chainName(deployment.chainId)} (${deployment.chainId})`;
+                        const networkName = chainName(deployment.chainId);
+                        const networkIconPath = getNetworkIconPath(deployment.chainId);
                         const explorerUrl = contractExplorerUrl(deployment.chainId, deployment.tokenAddress);
-                        const label = `${chainLabel} · ${deployment.tokenStandard}${deployment.tokenStandard === "ERC20" ? "" : ` #${deployment.tokenId}`}`;
+                        const tooltipLabel = `${networkName} (${deployment.chainId}) · ${deployment.tokenAddress}`;
                         return (
-                          <div key={`${asset.groupId}-${deployment.assetKey}`} className="queue-deployment-item">
+                          <span className="verified-list-network-icon-wrap" key={`${asset.groupId}-${deployment.assetKey}`}>
                             {explorerUrl ? (
-                              <a href={explorerUrl} target="_blank" rel="noreferrer">{label}</a>
+                              <a
+                                href={explorerUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="assets-catalog-card-network"
+                                title={tooltipLabel}
+                                aria-label={tooltipLabel}
+                              >
+                                <img src={networkIconPath} alt="" width={24} height={24} />
+                              </a>
                             ) : (
-                              <span>{label}</span>
+                              <span className="assets-catalog-card-network" title={tooltipLabel}>
+                                <img src={networkIconPath} alt="" width={24} height={24} />
+                              </span>
                             )}
-                          </div>
+                          </span>
                         );
                       })}
                     </div>
@@ -5511,22 +5536,33 @@ export default function App() {
       <section className="status-log card" aria-label="Status log">
         <div className="status-log-head">
           <span className="status-label">Status Log</span>
-          <span className="status-value">{status}</span>
+          <div className="status-log-head-actions">
+            <button
+              type="button"
+              className="btn btn-slim status-log-toggle"
+              onClick={() => setStatusLogVisible((previous) => !previous)}
+            >
+              {statusLogVisible ? "Hide" : "Show"}
+            </button>
+            <span className="status-value">{status}</span>
+          </div>
         </div>
-        <div
-          ref={statusLogRef}
-          className="status-log-list"
-          role="log"
-          aria-live="polite"
-          aria-relevant="additions text"
-        >
-          {statusHistory.map((entry) => (
-            <div key={entry.id} className={`status-log-entry ${entry.level === "error" ? "error" : ""}`}>
-              <span className="status-log-time">[{entry.timestamp}]</span>
-              <span className="status-log-message">{entry.message}</span>
-            </div>
-          ))}
-        </div>
+        {statusLogVisible ? (
+          <div
+            ref={statusLogRef}
+            className="status-log-list"
+            role="log"
+            aria-live="polite"
+            aria-relevant="additions text"
+          >
+            {statusHistory.map((entry) => (
+              <div key={entry.id} className={`status-log-entry ${entry.level === "error" ? "error" : ""}`}>
+                <span className="status-log-time">[{entry.timestamp}]</span>
+                <span className="status-log-message">{entry.message}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </section>
 
       {globalBusy ? (
