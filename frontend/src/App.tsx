@@ -1896,7 +1896,7 @@ export default function App() {
     if (!account) return;
     const intervalId = window.setInterval(() => {
       void refreshOnchainData(account);
-    }, 10_000);
+    }, 2_000);
     return () => window.clearInterval(intervalId);
   }, [account]);
 
