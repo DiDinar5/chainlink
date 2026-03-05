@@ -1,4 +1,13 @@
-import { type SyntheticEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ChangeEvent,
+  type DragEvent,
+  type KeyboardEvent,
+  type SyntheticEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import { BrowserProvider, Contract, Interface, JsonRpcProvider, ethers } from "ethers";
 import { useAppKit, useAppKitAccount, useAppKitProvider } from "@reown/appkit/react";
 import { IDKitWidget, IErrorState, ISuccessResult, VerificationLevel } from "@worldcoin/idkit";
@@ -58,9 +67,9 @@ type KybStubStatus = "not_started" | "in_review" | "verified";
 
 type TokenStandard = "ERC20" | "ERC721" | "ERC1155";
 type BuyerVerificationRequirement = "open" | "kyc" | "worldid" | "kyc_worldid";
+type AssetCategory = "Art" | "Commodities" | "Fund" | "Other" | "Private Credit" | "Private Equity" | "Real Estate" | "Stocks";
 
 type AppTab = "assets" | "personal" | "business" | "checkers" | "integrations";
-type UiTheme = "light" | "dark";
 
 type CatalogNetwork = {
   name: string;
@@ -73,14 +82,28 @@ type CatalogNetwork = {
 };
 
 type CatalogAsset = {
+  groupId: string;
   chainId: number;
   contract: string;
   tokenId: number;
+  deployments: Array<{
+    assetKey: string;
+    chainId: number;
+    tokenAddress: string;
+    tokenStandard: TokenStandard;
+    tokenId: string;
+  }>;
   name: string;
   subname: string;
+  legalName?: string;
+  companyRef?: string;
+  publisher: string;
+  publishedAt: number;
+  metadataUri: string;
+  metadataHash?: string;
   description: string;
   category: string;
-  healthScore: number;
+  buyerVerificationRequirement?: BuyerVerificationRequirement;
   priceUSDx: number;
   image: string;
   supplyForDemo: number;
@@ -134,13 +157,12 @@ type AssetDeploymentRecord = {
   verifiedAt?: number;
 };
 
-type RegistryRecordStatus = "queued" | "submitting" | "submitted" | "verified" | "failed";
-
 type AssetDraft = {
   name: string;
-  metadataUri: string;
-  metadataHash: string;
-  notes: string;
+  description: string;
+  category: AssetCategory;
+  maxSupply: string;
+  minPrice: string;
   buyerVerificationRequirement: BuyerVerificationRequirement;
   deployments: AssetDeploymentDraft[];
 };
@@ -149,9 +171,13 @@ type RegistryRecord = {
   id: string;
   createdAt: number;
   name: string;
+  description: string;
+  category?: AssetCategory;
+  imageUri?: string;
+  maxSupply?: string;
+  minPrice?: string;
   metadataUri: string;
   metadataHash: string;
-  notes: string;
   deployments: AssetDeploymentRecord[];
   companyLegalName?: string;
   companyRef?: string;
@@ -160,8 +186,6 @@ type RegistryRecord = {
   buyerVerificationRequirement?: BuyerVerificationRequirement;
   kybVerifiedAt?: number;
   kybRequestId?: string;
-  status: RegistryRecordStatus;
-  lastError?: string;
 };
 
 type ProgressCopy = {
@@ -198,8 +222,12 @@ type VerifiedAssetCard = {
   groupId: string;
   owner: string;
   name: string;
+  description?: string;
+  imageUri?: string;
   metadataUri: string;
   metadataHash: string;
+  maxSupply?: string;
+  minPrice?: string;
   latestVerifiedAt: number;
   latestUpdatedAt: number;
   deployments: VerifiedAssetDeployment[];
@@ -208,7 +236,6 @@ type VerifiedAssetCard = {
   companyJurisdiction?: string;
   companyWebsite?: string;
   buyerVerificationRequirement?: BuyerVerificationRequirement;
-  sourceRecordId?: string;
 };
 
 type StatusLogEntry = {
@@ -226,6 +253,9 @@ type ResolvedAssetMetadataSnapshot = {
   inlineImageDataUrl?: string;
   name: string;
   description: string;
+  category?: string;
+  maxSupply?: string;
+  minPrice?: string;
   buyerVerificationRequirement?: BuyerVerificationRequirement;
   companyLegalName?: string;
   companyRef?: string;
@@ -237,7 +267,6 @@ type ResolvedAssetMetadataSnapshot = {
 const SESSION_SECRET_STORAGE_PREFIX = "passstore:session-secret:";
 const KYB_STUB_STORAGE_PREFIX = "passstore:kyb-stub:";
 const KYB_COMPANY_PROFILE_STORAGE_PREFIX = "passstore:kyb-company-profile:";
-const REGISTRY_QUEUE_STORAGE_PREFIX = "passstore:registry-queue:";
 const IPFS_HTTP_GATEWAYS = [
   "https://ipfs.io/ipfs/",
   "https://cloudflare-ipfs.com/ipfs/",
@@ -251,6 +280,16 @@ const NETWORK_OPTIONS: NetworkOption[] = [
   { chainId: 421614, label: "Arbitrum Sepolia" },
   { chainId: 80002, label: "Polygon Amoy" },
   { chainId: 97, label: "BSC Testnet" }
+];
+const ASSET_CATEGORY_OPTIONS: AssetCategory[] = [
+  "Art",
+  "Commodities",
+  "Fund",
+  "Other",
+  "Private Credit",
+  "Private Equity",
+  "Real Estate",
+  "Stocks"
 ];
 
 function isTokenStandard(value: unknown): value is TokenStandard {
@@ -285,6 +324,32 @@ function normalizeBuyerVerificationRequirement(value: unknown): BuyerVerificatio
     default:
       return undefined;
   }
+}
+
+function normalizeAssetCategory(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const raw = value.trim();
+  if (!raw) {
+    return undefined;
+  }
+
+  const normalized = raw
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const compact = normalized.replace(/\s+/g, "");
+
+  for (const option of ASSET_CATEGORY_OPTIONS) {
+    const normalizedOption = option.toLowerCase();
+    if (normalizedOption === normalized || normalizedOption.replace(/\s+/g, "") === compact) {
+      return option;
+    }
+  }
+
+  return raw;
 }
 
 function buyerVerificationRequirementLabel(value: BuyerVerificationRequirement): string {
@@ -350,11 +415,7 @@ function getNetworkIconPath(chainId: number): string {
 }
 
 function assetVerificationRequirement(asset: CatalogAsset): BuyerVerificationRequirement {
-  const seed = `${asset.chainId}-${asset.tokenId}-${asset.name}`;
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h << 5) - h + seed.charCodeAt(i);
-  const n = Math.abs(h) % 3;
-  return n === 0 ? "kyc" : n === 1 ? "worldid" : "kyc_worldid";
+  return asset.buyerVerificationRequirement ?? "open";
 }
 
 function buyerVerificationRequirementBadgeClass(value: BuyerVerificationRequirement): "ok" | "neutral" | "warn" {
@@ -419,6 +480,117 @@ function metadataString(value: unknown): string | undefined {
   }
   const normalized = value.trim();
   return normalized || undefined;
+}
+
+function metadataScalarString(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return metadataString(value);
+}
+
+function metadataSupplyAndPrice(payload: Record<string, unknown>): Pick<ResolvedAssetMetadataSnapshot, "maxSupply" | "minPrice"> {
+  const properties = metadataObject(payload.properties);
+
+  const pick = (...keys: string[]): string | undefined => {
+    for (const key of keys) {
+      const topLevel = metadataScalarString(payload[key]);
+      if (topLevel) {
+        return topLevel;
+      }
+      const nested = properties ? metadataScalarString(properties[key]) : undefined;
+      if (nested) {
+        return nested;
+      }
+    }
+    return undefined;
+  };
+
+  const maxSupplyFromFields = pick("maxSupply", "max_supply", "supply", "totalSupply");
+  const minPriceFromFields = pick("minPrice", "minprice", "min_price", "price", "floorPrice");
+
+  if (maxSupplyFromFields || minPriceFromFields) {
+    return {
+      maxSupply: maxSupplyFromFields,
+      minPrice: minPriceFromFields
+    };
+  }
+
+  const attributes = Array.isArray(payload.attributes) ? payload.attributes : [];
+  let maxSupply: string | undefined;
+  let minPrice: string | undefined;
+
+  for (const rawAttribute of attributes) {
+    if (!rawAttribute || typeof rawAttribute !== "object" || Array.isArray(rawAttribute)) {
+      continue;
+    }
+    const attribute = rawAttribute as Record<string, unknown>;
+    const traitType = metadataString(attribute.trait_type)?.toLowerCase() ?? metadataString(attribute.traitType)?.toLowerCase() ?? "";
+    const value = metadataScalarString(attribute.value);
+    if (!value) {
+      continue;
+    }
+    if (!maxSupply && (traitType === "maxsupply" || traitType === "max_supply")) {
+      maxSupply = value;
+    }
+    if (!minPrice && (traitType === "minprice" || traitType === "min_price")) {
+      minPrice = value;
+    }
+  }
+
+  return { maxSupply, minPrice };
+}
+
+function assetCategoryFromMetadata(payload: Record<string, unknown>): string | undefined {
+  const properties = metadataObject(payload.properties);
+  const topLevelCandidates = [
+    payload.category,
+    payload.assetCategory,
+    payload.asset_class,
+    payload.assetClass,
+    payload.classification
+  ];
+  const propertyCandidates = properties
+    ? [
+      properties.category,
+      properties.assetCategory,
+      properties.asset_class,
+      properties.assetClass,
+      properties.classification
+    ]
+    : [];
+
+  for (const candidate of [...topLevelCandidates, ...propertyCandidates]) {
+    const normalized = normalizeAssetCategory(metadataScalarString(candidate));
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  const attributes = Array.isArray(payload.attributes) ? payload.attributes : [];
+  for (const rawAttribute of attributes) {
+    if (!rawAttribute || typeof rawAttribute !== "object" || Array.isArray(rawAttribute)) {
+      continue;
+    }
+    const attribute = rawAttribute as Record<string, unknown>;
+    const traitType = metadataString(attribute.trait_type)?.toLowerCase() ?? metadataString(attribute.traitType)?.toLowerCase() ?? "";
+    if (
+      traitType !== "category" &&
+      traitType !== "assetcategory" &&
+      traitType !== "asset_class" &&
+      traitType !== "assetclass" &&
+      traitType !== "classification" &&
+      traitType !== "class"
+    ) {
+      continue;
+    }
+    const normalized = normalizeAssetCategory(metadataScalarString(attribute.value));
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return undefined;
 }
 
 function metadataCompanyFields(payload: Record<string, unknown>): Pick<
@@ -641,20 +813,6 @@ function reasonLabel(reason: number): string {
   }
 }
 
-function queueStatusBadgeClass(status: RegistryRecordStatus): "ok" | "warn" | "neutral" {
-  switch (status) {
-    case "verified":
-      return "ok";
-    case "failed":
-      return "warn";
-    case "queued":
-    case "submitting":
-    case "submitted":
-    default:
-      return "neutral";
-  }
-}
-
 function formatUnixTimestamp(ts: number): string {
   if (!ts) {
     return "Never";
@@ -761,10 +919,6 @@ function kybStubStorageKey(address: string): string {
 
 function kybCompanyProfileStorageKey(address: string): string {
   return `${KYB_COMPANY_PROFILE_STORAGE_PREFIX}${address.toLowerCase()}`;
-}
-
-function registryQueueStorageKey(address: string): string {
-  return `${REGISTRY_QUEUE_STORAGE_PREFIX}${address.toLowerCase()}`;
 }
 
 function readSessionSecret(address: string): string {
@@ -884,6 +1038,40 @@ function writeKybCompanyProfile(address: string, profile: KybCompanyProfile | nu
   } catch {
     // Ignore storage issues in dev flow.
   }
+}
+
+function issuerMetadataFromProfile(
+  profile: KybCompanyProfile | null
+): {
+  name?: string;
+  legalName?: string;
+  companyRef?: string;
+  website?: string;
+  jurisdiction?: string;
+  registrationCountry?: string;
+} | undefined {
+  if (!profile) {
+    return undefined;
+  }
+
+  const name = profile.legalName?.trim();
+  const companyRef = profile.companyRef?.trim();
+  const website = profile.website?.trim();
+  const jurisdiction = profile.jurisdiction?.trim();
+  const registrationCountry = profile.registrationCountry?.trim();
+
+  if (!name && !companyRef && !website && !jurisdiction && !registrationCountry) {
+    return undefined;
+  }
+
+  return {
+    name: name || undefined,
+    legalName: name || undefined,
+    companyRef: companyRef || undefined,
+    website: website || undefined,
+    jurisdiction: jurisdiction || undefined,
+    registrationCountry: registrationCountry || undefined
+  };
 }
 
 function makeDraftRowId(): string {
@@ -1342,6 +1530,8 @@ function metadataReadySnapshot(metadataHttpUrl: string, payload: Record<string, 
     inlineImageDataUrl,
     name: typeof payload.name === "string" ? payload.name.trim() : "",
     description: typeof payload.description === "string" ? payload.description.trim() : "",
+    category: assetCategoryFromMetadata(payload),
+    ...metadataSupplyAndPrice(payload),
     buyerVerificationRequirement: buyerVerificationRequirementFromMetadata(payload),
     ...metadataCompanyFields(payload)
   };
@@ -1364,158 +1554,13 @@ function externalHttpUrl(url: string): string {
   return "";
 }
 
-function readRegistryQueue(address: string): RegistryRecord[] {
-  if (typeof window === "undefined" || !address) {
-    return [];
-  }
-
-  try {
-    const raw = window.localStorage.getItem(registryQueueStorageKey(address));
-    if (!raw) {
-      return [];
-    }
-
-    const parsed = JSON.parse(raw) as Array<Record<string, unknown>>;
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-
-    const normalized: RegistryRecord[] = [];
-    for (const item of parsed) {
-      if (!item || typeof item !== "object") {
-        continue;
-      }
-
-      const deploymentsRaw = Array.isArray(item.deployments) ? item.deployments : [];
-      const deployments: AssetDeploymentRecord[] = [];
-
-      for (const deployment of deploymentsRaw) {
-        if (!deployment || typeof deployment !== "object") {
-          continue;
-        }
-
-        const chainId = Number((deployment as Record<string, unknown>).chainId);
-        const tokenAddress = String((deployment as Record<string, unknown>).tokenAddress ?? "");
-        const tokenStandardValue = (deployment as Record<string, unknown>).tokenStandard;
-        const tokenId = String((deployment as Record<string, unknown>).tokenId ?? "0");
-        if (!Number.isInteger(chainId) || chainId <= 0 || !isTokenStandard(tokenStandardValue)) {
-          continue;
-        }
-        deployments.push({
-          chainId,
-          tokenAddress,
-          tokenStandard: tokenStandardValue,
-          tokenId,
-          assetRequestId:
-            typeof (deployment as Record<string, unknown>).assetRequestId === "string"
-              ? String((deployment as Record<string, unknown>).assetRequestId)
-              : undefined,
-          requestTxHash:
-            typeof (deployment as Record<string, unknown>).requestTxHash === "string"
-              ? String((deployment as Record<string, unknown>).requestTxHash)
-              : undefined,
-          requestBlockNumber:
-            typeof (deployment as Record<string, unknown>).requestBlockNumber === "number"
-              ? Number((deployment as Record<string, unknown>).requestBlockNumber)
-              : undefined,
-          assetKey:
-            typeof (deployment as Record<string, unknown>).assetKey === "string"
-              ? String((deployment as Record<string, unknown>).assetKey)
-              : undefined,
-          verifyTxHash:
-            typeof (deployment as Record<string, unknown>).verifyTxHash === "string"
-              ? String((deployment as Record<string, unknown>).verifyTxHash)
-              : undefined,
-          verifyBlockNumber:
-            typeof (deployment as Record<string, unknown>).verifyBlockNumber === "number"
-              ? Number((deployment as Record<string, unknown>).verifyBlockNumber)
-              : undefined,
-          verifiedAt:
-            typeof (deployment as Record<string, unknown>).verifiedAt === "number"
-              ? Number((deployment as Record<string, unknown>).verifiedAt)
-              : undefined
-        });
-      }
-
-      // Backward compatibility with the old single-network record format.
-      if (deployments.length === 0) {
-        const legacyChainId = Number(item.chainId);
-        const legacyTokenAddress = String(item.tokenAddress ?? "");
-        const legacyTokenStandard = item.tokenStandard;
-        const legacyTokenId = String(item.tokenId ?? "0");
-        if (
-          Number.isInteger(legacyChainId) &&
-          legacyChainId > 0 &&
-          isTokenStandard(legacyTokenStandard) &&
-          legacyTokenAddress
-        ) {
-          deployments.push({
-            chainId: legacyChainId,
-            tokenAddress: legacyTokenAddress,
-            tokenStandard: legacyTokenStandard,
-            tokenId: legacyTokenId
-          });
-        }
-      }
-
-      if (deployments.length === 0) {
-        continue;
-      }
-
-      const rawStatus = String(item.status ?? "queued");
-      const status: RegistryRecordStatus =
-        rawStatus === "queued" ||
-        rawStatus === "submitting" ||
-        rawStatus === "submitted" ||
-        rawStatus === "verified" ||
-        rawStatus === "failed"
-          ? rawStatus
-          : "queued";
-
-      normalized.push({
-        id: String(item.id ?? makeDraftRowId()),
-        createdAt: Number(item.createdAt ?? Date.now()),
-        name: String(item.name ?? ""),
-        metadataUri: String(item.metadataUri ?? ""),
-        metadataHash: String(item.metadataHash ?? ""),
-        notes: String(item.notes ?? ""),
-        deployments,
-        companyLegalName: typeof item.companyLegalName === "string" ? item.companyLegalName : undefined,
-        companyRef: typeof item.companyRef === "string" ? item.companyRef : undefined,
-        companyJurisdiction: typeof item.companyJurisdiction === "string" ? item.companyJurisdiction : undefined,
-        companyWebsite: typeof item.companyWebsite === "string" ? item.companyWebsite : undefined,
-        buyerVerificationRequirement: normalizeBuyerVerificationRequirement(item.buyerVerificationRequirement),
-        kybVerifiedAt: typeof item.kybVerifiedAt === "number" ? item.kybVerifiedAt : undefined,
-        kybRequestId: typeof item.kybRequestId === "string" ? item.kybRequestId : undefined,
-        status,
-        lastError: typeof item.lastError === "string" ? item.lastError : undefined
-      });
-    }
-
-    return normalized;
-  } catch {
-    return [];
-  }
-}
-
-function writeRegistryQueue(address: string, queue: RegistryRecord[]): void {
-  if (typeof window === "undefined" || !address) {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(registryQueueStorageKey(address), JSON.stringify(queue));
-  } catch {
-    // Ignore storage issues in dev flow.
-  }
-}
-
 function defaultAssetDraft(chainId: number): AssetDraft {
   return {
     name: "",
-    metadataUri: "",
-    metadataHash: "",
-    notes: "",
+    description: "",
+    category: "Other",
+    maxSupply: "",
+    minPrice: "",
     buyerVerificationRequirement: "kyc",
     deployments: [createDeploymentDraft(chainId)]
   };
@@ -1581,11 +1626,10 @@ export default function App() {
   const [kybCompanyProfile, setKybCompanyProfile] = useState<KybCompanyProfile | null>(null);
   const [hasKybRequest, setHasKybRequest] = useState<boolean>(false);
   const [latestKybRequestId, setLatestKybRequestId] = useState<string>("-");
-  const [generatedPresetCursor, setGeneratedPresetCursor] = useState<number>(0);
-  const [createRealIpfsData, setCreateRealIpfsData] = useState<boolean>(false);
-  const [generatingAsset, setGeneratingAsset] = useState<boolean>(false);
   const [assetDraft, setAssetDraft] = useState<AssetDraft>(defaultAssetDraft(env.chainId));
-  const [registryQueue, setRegistryQueue] = useState<RegistryRecord[]>([]);
+  const [assetImageFile, setAssetImageFile] = useState<File | null>(null);
+  const [assetImageDragActive, setAssetImageDragActive] = useState<boolean>(false);
+  const [assetImagePreviewUrl, setAssetImagePreviewUrl] = useState<string>("");
   const [verifiedAssets, setVerifiedAssets] = useState<VerifiedAssetCard[]>([]);
   const [resolvedAssetMetadataByUri, setResolvedAssetMetadataByUri] = useState<Record<string, ResolvedAssetMetadataSnapshot>>({});
   const [refreshingAssets, setRefreshingAssets] = useState<boolean>(false);
@@ -1603,25 +1647,13 @@ export default function App() {
   const [integrationAssetsRequested, setIntegrationAssetsRequested] = useState<boolean>(false);
   const [integrationAssetsLoading, setIntegrationAssetsLoading] = useState<boolean>(false);
   const [integrationAssetsResponse, setIntegrationAssetsResponse] = useState<unknown | null>(null);
-  const [catalogData, setCatalogData] = useState<CatalogData | null>(null);
-  const [catalogLoading, setCatalogLoading] = useState<boolean>(false);
-  const [catalogError, setCatalogError] = useState<string | null>(null);
   const [assetsCatalogCategory, setAssetsCatalogCategory] = useState<string>("all");
   const [selectedCatalogAsset, setSelectedCatalogAsset] = useState<CatalogAsset | null>(null);
   const [assetDetailTab, setAssetDetailTab] = useState<"price" | "description" | "documents">("description");
   const [assetDetailAmount, setAssetDetailAmount] = useState<string>("1");
-  const [uiTheme, setUiTheme] = useState<UiTheme>(() => {
-    if (typeof window === "undefined") {
-      return "dark";
-    }
-    try {
-      const stored = window.localStorage.getItem("vam-ui-theme");
-      return stored === "light" ? "light" : "dark";
-    } catch {
-      return "dark";
-    }
-  });
-
+  const [personalCardsView, setPersonalCardsView] = useState<"list" | "grid">("list");
+  const [assetRegistryIntakeVisible, setAssetRegistryIntakeVisible] = useState<boolean>(true);
+  const [statusLogVisible, setStatusLogVisible] = useState<boolean>(true);
   const { open } = useAppKit();
   const { address: appKitAddress, isConnected: isAppKitConnected } = useAppKitAccount({ namespace: "eip155" });
   const { walletProvider } = useAppKitProvider<WalletProviderLike>("eip155");
@@ -1630,10 +1662,13 @@ export default function App() {
   const worldIdPollNonceRef = useRef<number>(0);
   const kybPollNonceRef = useRef<number>(0);
   const worldIdPendingAddressRef = useRef<string>("");
+  const activeTabRef = useRef<AppTab>("personal");
+  const assetsViewModeRef = useRef<AssetsViewMode>("all");
   const sumsubAutoSyncInFlightRef = useRef<boolean>(false);
   const sumsubAutoSyncCooldownUntilRef = useRef<number>(0);
   const statusLogRef = useRef<HTMLDivElement | null>(null);
   const statusLogCounterRef = useRef<number>(0);
+  const assetImageInputRef = useRef<HTMLInputElement | null>(null);
 
   const provider = useMemo(() => {
     if (!walletProvider) {
@@ -1649,57 +1684,99 @@ export default function App() {
     return new JsonRpcProvider(env.rpcUrl);
   }, []);
 
-  const baseCatalogAssets: CatalogAsset[] = catalogData?.assets ?? [];
   const verifiedCatalogAssets: CatalogAsset[] = useMemo(() => {
-    if (!catalogData) {
-      return [];
-    }
     const items: CatalogAsset[] = [];
     for (const card of verifiedAssets) {
-      for (const deployment of card.deployments) {
-        const existing = baseCatalogAssets.find(
-          (asset) =>
-            asset.chainId === deployment.chainId &&
-            asset.contract.toLowerCase() === deployment.tokenAddress.toLowerCase() &&
-            asset.tokenId === deployment.tokenId
-        );
-        if (existing) {
-          continue;
-        }
-        const meta = resolvedAssetMetadataByUri[card.metadataUri];
-        const description = meta?.description || "";
-        const name = meta?.name || card.name;
-        const subname = card.companyLegalName || card.companyRef || "Verified issuer";
-        const image =
-          meta?.inlineImageDataUrl ||
-          meta?.imageHttpUrl ||
-          "";
-        items.push({
-          chainId: deployment.chainId,
-          contract: deployment.tokenAddress,
-          tokenId: deployment.tokenId,
-          name,
-          subname,
-          description,
-          category: "Verified",
-          healthScore: 80,
-          priceUSDx: 0,
-          image,
-          supplyForDemo: 0
-        });
+      if (card.deployments.length === 0) {
+        continue;
       }
+      const primaryDeployment = card.deployments[0];
+      const primaryTokenId = Number(primaryDeployment.tokenId);
+      const meta = resolvedAssetMetadataByUri[card.metadataUri];
+      const description = meta?.description || "";
+      const name = meta?.name || card.name;
+      const category = meta?.category?.trim() || "Other";
+      const buyerRequirement =
+        meta?.buyerVerificationRequirement || card.buyerVerificationRequirement || "open";
+      const legalName = meta?.companyLegalName || card.companyLegalName || "";
+      const companyRef = meta?.companyRef || card.companyRef || "";
+      const maxSupplyValue = meta?.maxSupply || card.maxSupply;
+      const minPriceValue = meta?.minPrice || card.minPrice;
+      const supplyForDemoParsed = maxSupplyValue ? Number(maxSupplyValue) : 0;
+      const minPriceParsed = minPriceValue ? Number(minPriceValue) : 0;
+      const publishedAt = card.deployments.reduce((earliest, deployment) => {
+        if (deployment.verifiedAt <= 0) {
+          return earliest;
+        }
+        if (earliest <= 0) {
+          return deployment.verifiedAt;
+        }
+        return Math.min(earliest, deployment.verifiedAt);
+      }, card.latestVerifiedAt);
+      const subname = legalName || companyRef || "Verified issuer";
+      const image =
+        meta?.inlineImageDataUrl ||
+        meta?.imageHttpUrl ||
+        "";
+      items.push({
+        groupId: card.groupId,
+        chainId: primaryDeployment.chainId,
+        contract: primaryDeployment.tokenAddress,
+        tokenId: Number.isFinite(primaryTokenId) ? primaryTokenId : 0,
+        deployments: card.deployments.map((deployment) => ({
+          assetKey: deployment.assetKey,
+          chainId: deployment.chainId,
+          tokenAddress: deployment.tokenAddress,
+          tokenStandard: deployment.tokenStandard,
+          tokenId: deployment.tokenId
+        })),
+        name,
+        subname,
+        legalName: legalName || undefined,
+        companyRef: companyRef || undefined,
+        publisher: card.owner,
+        publishedAt: publishedAt > 0 ? publishedAt : card.latestVerifiedAt,
+        metadataUri: card.metadataUri,
+        metadataHash: card.metadataHash || undefined,
+        description,
+        category,
+        buyerVerificationRequirement: buyerRequirement,
+        priceUSDx: Number.isFinite(minPriceParsed) && minPriceParsed > 0 ? minPriceParsed : 0,
+        image,
+        supplyForDemo: Number.isFinite(supplyForDemoParsed) && supplyForDemoParsed > 0 ? supplyForDemoParsed : 0
+      });
     }
     return items;
-  }, [catalogData, verifiedAssets, resolvedAssetMetadataByUri, baseCatalogAssets]);
+  }, [verifiedAssets, resolvedAssetMetadataByUri]);
 
   const catalogAssetsCombined: CatalogAsset[] = useMemo(
-    () => [...baseCatalogAssets, ...verifiedCatalogAssets],
-    [baseCatalogAssets, verifiedCatalogAssets]
+    () => [...verifiedCatalogAssets],
+    [verifiedCatalogAssets]
   );
 
   useEffect(() => {
     sessionSecretKeyRef.current = sessionSecretKeyHex;
   }, [sessionSecretKeyHex]);
+
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+
+  useEffect(() => {
+    assetsViewModeRef.current = assetsViewMode;
+  }, [assetsViewMode]);
+
+  useEffect(() => {
+    if (!assetImageFile) {
+      setAssetImagePreviewUrl("");
+      return;
+    }
+    const nextUrl = URL.createObjectURL(assetImageFile);
+    setAssetImagePreviewUrl(nextUrl);
+    return () => {
+      URL.revokeObjectURL(nextUrl);
+    };
+  }, [assetImageFile]);
 
   useEffect(() => {
     const timestamp = new Date().toLocaleTimeString();
@@ -1758,30 +1835,17 @@ export default function App() {
   }, [statusHistory]);
 
   useEffect(() => {
-    const darkThemeClass = "theme-dark";
     const lightThemeClass = "theme-light";
     const legacyDarkThemeClass = "page-theme-light";
-    document.body.classList.toggle(darkThemeClass, uiTheme === "dark");
-    document.body.classList.toggle(lightThemeClass, uiTheme === "light");
+    document.body.classList.add(lightThemeClass);
+    document.body.classList.remove("theme-dark");
     document.body.classList.remove(legacyDarkThemeClass);
 
     return () => {
-      document.body.classList.remove(darkThemeClass);
       document.body.classList.remove(lightThemeClass);
       document.body.classList.remove(legacyDarkThemeClass);
     };
-  }, [uiTheme]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    try {
-      window.localStorage.setItem("vam-ui-theme", uiTheme);
-    } catch {
-      // Ignore storage failures in dev/local environments.
-    }
-  }, [uiTheme]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1858,8 +1922,6 @@ export default function App() {
         setKybCompanyProfile(null);
         setHasKybRequest(false);
         setLatestKybRequestId("-");
-        setRegistryQueue([]);
-        setVerifiedAssets([]);
         setStatus("Wallet disconnected");
       }
       return;
@@ -1904,8 +1966,6 @@ export default function App() {
     if (!account) {
       setKybStubStatus("not_started");
       setKybCompanyProfile(null);
-      setRegistryQueue([]);
-      setVerifiedAssets([]);
       setRequestId("-");
       setSdkTokenPreview("-");
       setSdkPacketStage("idle");
@@ -1917,7 +1977,6 @@ export default function App() {
     setKybStubStatus(readKybStubStatus(account));
     const storedCompanyProfile = readKybCompanyProfile(account);
     setKybCompanyProfile(storedCompanyProfile ?? buildStubCompanyProfile(account));
-    setRegistryQueue(readRegistryQueue(account));
   }, [account]);
 
   useEffect(() => {
@@ -1933,13 +1992,6 @@ export default function App() {
     }
     writeKybCompanyProfile(account, kybCompanyProfile);
   }, [account, kybCompanyProfile]);
-
-  useEffect(() => {
-    if (!account) {
-      return;
-    }
-    writeRegistryQueue(account, registryQueue);
-  }, [account, registryQueue]);
 
   useEffect(() => {
     if (activeTab === "assets" || !account || !provider) {
@@ -1963,28 +2015,10 @@ export default function App() {
   }, [assetsViewMode, account]);
 
   useEffect(() => {
-    if (catalogData !== null) {
-      return;
+    if (activeTab !== "assets") {
+      setSelectedCatalogAsset(null);
     }
-    setCatalogLoading(true);
-    setCatalogError(null);
-    fetch("/data/assets.json")
-      .then((res) => {
-        if (!res.ok) {
-          throw new Error("Failed to load assets catalog");
-        }
-        return res.json() as Promise<CatalogData>;
-      })
-      .then((data) => {
-        setCatalogData(data);
-      })
-      .catch((err: Error) => {
-        setCatalogError(err.message ?? "Failed to load catalog");
-      })
-      .finally(() => {
-        setCatalogLoading(false);
-      });
-  }, [catalogData]);
+  }, [activeTab]);
 
   useEffect(() => {
     if (activeTab !== "assets") {
@@ -2006,6 +2040,19 @@ export default function App() {
       window.clearInterval(intervalId);
     };
   }, [activeTab, publicReadProvider, provider, assetsViewMode, account]);
+
+  useEffect(() => {
+    if (account) {
+      return;
+    }
+
+    const assetsProvider = publicReadProvider ?? provider;
+    if (!assetsProvider) {
+      return;
+    }
+
+    void refreshVerifiedAssets(undefined, assetsProvider, "public");
+  }, [account, publicReadProvider, provider]);
 
   useEffect(() => {
     if (!account || !attestation) {
@@ -2442,7 +2489,11 @@ export default function App() {
       setCreIssuerAllowed(Boolean(allowed));
     }
 
-    await refreshVerifiedAssets(user, activeProvider);
+    // Do not overwrite public Assets catalog with owner-only data while user browses "All assets".
+    const shouldRefreshOwnerAssets = activeTab !== "assets" || assetsViewMode === "mine";
+    if (shouldRefreshOwnerAssets) {
+      await refreshVerifiedAssets(user, activeProvider, "owner");
+    }
 
     return {
       verify: verifySnapshot,
@@ -2535,7 +2586,6 @@ export default function App() {
         companyJurisdiction?: string;
         companyWebsite?: string;
         buyerVerificationRequirement?: BuyerVerificationRequirement;
-        sourceRecordId?: string;
       };
 
       const verifiedRows: VerifiedDeploymentRow[] = [];
@@ -2560,16 +2610,6 @@ export default function App() {
         const verifyMeta = verifyMetaByKey.get(key.toLowerCase());
         const ownerValue = String(record[0] ?? "").toLowerCase() || ownerByKey.get(key.toLowerCase()) || requestedUser;
 
-        const linkedQueueRecord = registryQueue.find((item) =>
-          item.deployments.some(
-            (deployment) =>
-              deployment.chainId === chainIdValue &&
-              deployment.tokenStandard === tokenStandardValue &&
-              deployment.tokenId === tokenIdValue &&
-              deployment.tokenAddress.toLowerCase() === tokenAddressValue.toLowerCase()
-          )
-        );
-
         verifiedRows.push({
           assetKey: key,
           owner: ownerValue,
@@ -2577,27 +2617,22 @@ export default function App() {
           tokenAddress: tokenAddressValue,
           tokenStandard: tokenStandardValue,
           tokenId: tokenIdValue,
-          name: linkedQueueRecord?.name || symbolOrNameValue,
-          metadataUri: linkedQueueRecord?.metadataUri || metadataUriValue,
-          metadataHash: linkedQueueRecord?.metadataHash || metadataHashValue,
-          companyLegalName: linkedQueueRecord?.companyLegalName,
-          companyRef: linkedQueueRecord?.companyRef,
-          companyJurisdiction: linkedQueueRecord?.companyJurisdiction,
-          companyWebsite: linkedQueueRecord?.companyWebsite,
-          buyerVerificationRequirement: linkedQueueRecord?.buyerVerificationRequirement,
+          name: symbolOrNameValue,
+          metadataUri: metadataUriValue,
+          metadataHash: metadataHashValue,
+          buyerVerificationRequirement: undefined,
           kybRequestId: kybRequestIdValue,
           verifiedAt: verifiedAtValue,
           updatedAt: updatedAtValue,
           verifyTxHash: verifyMeta?.txHash,
-          verifyBlockNumber: verifyMeta?.blockNumber,
-          sourceRecordId: linkedQueueRecord?.id
+          verifyBlockNumber: verifyMeta?.blockNumber
         });
       }
 
       const groupedByAsset = new Map<string, VerifiedAssetCard>();
       for (const row of verifiedRows) {
         const fallbackGroup = `${row.owner}:${row.name}:${row.metadataHash || row.metadataUri}`;
-        const groupId = row.sourceRecordId ?? fallbackGroup;
+        const groupId = fallbackGroup;
         const existing = groupedByAsset.get(groupId);
 
         if (!existing) {
@@ -2627,8 +2662,7 @@ export default function App() {
             companyRef: row.companyRef,
             companyJurisdiction: row.companyJurisdiction,
             companyWebsite: row.companyWebsite,
-            buyerVerificationRequirement: row.buyerVerificationRequirement,
-            sourceRecordId: row.sourceRecordId
+            buyerVerificationRequirement: row.buyerVerificationRequirement
           });
           continue;
         }
@@ -2680,48 +2714,12 @@ export default function App() {
         return right.latestUpdatedAt - left.latestUpdatedAt;
       });
 
-      setVerifiedAssets(groupedCards);
-
-      if (!isPublicScope) {
-        setRegistryQueue((previous) =>
-          previous.map((item) => {
-          const updatedDeployments = item.deployments.map((deployment) => {
-            const matchedRow = verifiedRows.find(
-              (row) =>
-                row.chainId === deployment.chainId &&
-                row.tokenStandard === deployment.tokenStandard &&
-                row.tokenId === deployment.tokenId &&
-                row.tokenAddress.toLowerCase() === deployment.tokenAddress.toLowerCase()
-            );
-
-            if (!matchedRow) {
-              return deployment;
-            }
-
-            return {
-              ...deployment,
-              assetKey: matchedRow.assetKey,
-              verifyTxHash: matchedRow.verifyTxHash ?? deployment.verifyTxHash,
-              verifyBlockNumber: matchedRow.verifyBlockNumber ?? deployment.verifyBlockNumber,
-              verifiedAt: matchedRow.verifiedAt
-            };
-          });
-
-          const allVerified = updatedDeployments.every((deployment) => Boolean(deployment.assetKey));
-          let nextStatus: RegistryRecordStatus = item.status;
-          if (allVerified) {
-            nextStatus = "verified";
-          } else if (item.status === "submitted" || item.status === "verified") {
-            nextStatus = "submitted";
-          }
-
-          return {
-            ...item,
-            deployments: updatedDeployments,
-            status: nextStatus
-          };
-          })
-        );
+      const ownerResultWouldOverwritePublicCatalog =
+        scope === "owner" &&
+        activeTabRef.current === "assets" &&
+        assetsViewModeRef.current !== "mine";
+      if (!ownerResultWouldOverwritePublicCatalog) {
+        setVerifiedAssets(groupedCards);
       }
     } catch (err) {
       console.error("Failed to refresh verified assets", err);
@@ -3259,117 +3257,60 @@ export default function App() {
     setAssetDraft((previous) => ({ ...previous, [field]: value }));
   }
 
-  async function generateAssetDraftFromPreset() {
-    if (GENERATED_ASSET_PRESETS.length === 0) {
-      setError("No asset presets configured");
+  function openAssetImagePicker() {
+    assetImageInputRef.current?.click();
+  }
+
+  function clearAssetImageFile() {
+    setAssetImageFile(null);
+    if (assetImageInputRef.current) {
+      assetImageInputRef.current.value = "";
+    }
+  }
+
+  function applyAssetImageFile(file: File | null) {
+    if (!file) {
       return;
     }
-
-    const presetIndex = generatedPresetCursor % GENERATED_ASSET_PRESETS.length;
-    const preset = GENERATED_ASSET_PRESETS[presetIndex];
-
-    if (!createRealIpfsData) {
-      const metadataHash = ethers.keccak256(ethers.toUtf8Bytes(`${preset.name}|${preset.metadataUri}`));
-
-      setError("");
-      setAssetDraft({
-        name: preset.name,
-        metadataUri: preset.metadataUri,
-        metadataHash,
-        notes: preset.notes,
-        buyerVerificationRequirement: assetDraft.buyerVerificationRequirement,
-        deployments: preset.deployments.map((deployment) => deploymentDraftFromPresetRow(deployment))
-      });
-      setGeneratedPresetCursor((previous) => (previous + 1) % GENERATED_ASSET_PRESETS.length);
-      setStatus(`Generated asset preset: ${preset.name}`);
+    if (!file.type.startsWith("image/")) {
+      setError("Use an image file (PNG/JPG/SVG/WebP)");
       return;
     }
-
-    if (!env.pinataJwt) {
-      setError("Missing VITE_PINATA_JWT in frontend/.env for real IPFS generation");
-      return;
-    }
-
-    setBusy(true);
     setError("");
+    setAssetImageFile(file);
+  }
 
-    try {
-      const generatedAt = new Date();
-      const slug = slugifyAssetName(preset.name);
-      const imageFileName = `${slug}-${generatedAt.getTime()}.svg`;
-      const issuerMetadata = (() => {
-        if (!kybCompanyProfile) {
-          return undefined;
-        }
-        const name = kybCompanyProfile.legalName?.trim();
-        const companyRef = kybCompanyProfile.companyRef?.trim();
-        const website = kybCompanyProfile.website?.trim();
-        const jurisdiction = kybCompanyProfile.jurisdiction?.trim();
-        const registrationCountry = kybCompanyProfile.registrationCountry?.trim();
-        if (!name && !companyRef && !website && !jurisdiction && !registrationCountry) {
-          return undefined;
-        }
-        return {
-          name: name || undefined,
-          legalName: name || undefined,
-          companyRef: companyRef || undefined,
-          website: website || undefined,
-          jurisdiction: jurisdiction || undefined,
-          registrationCountry: registrationCountry || undefined
-        };
-      })();
+  function handleAssetImageInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    applyAssetImageFile(file);
+  }
 
-      setStatus("Generating asset preview image...");
-      const imageSvg = compactSvg(buildGeneratedAssetPreviewSvg(preset, generatedAt));
-      assertValidSvgXml(imageSvg);
-      const imageBlob = new Blob([imageSvg], { type: "image/svg+xml" });
+  function handleAssetImageDragOver(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    if (!assetImageDragActive) {
+      setAssetImageDragActive(true);
+    }
+  }
 
-      setStatus("Uploading generated image to Pinata...");
-      const imageCid = await uploadFileToPinata(imageBlob, imageFileName, env.pinataJwt, `${preset.name} image`);
-      const imageUri = `ipfs://${imageCid}`;
+  function handleAssetImageDragLeave(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      return;
+    }
+    setAssetImageDragActive(false);
+  }
 
-      const metadataPayload = {
-        name: preset.name,
-        description: preset.notes,
-        image: imageUri,
-        image_data: imageSvg,
-        attributes: [],
-        buyerVerificationRequirement: assetDraft.buyerVerificationRequirement,
-        issuer: issuerMetadata,
-        properties: {
-          generatedAt: generatedAt.toISOString(),
-          source: "passstore-frontend-pinata-generator",
-          metadataScope: "shared_asset",
-          imageDataFormat: "svg",
-          buyerVerificationRequirement: assetDraft.buyerVerificationRequirement,
-          buyerVerificationLabel: buyerVerificationRequirementLabel(assetDraft.buyerVerificationRequirement),
-          issuer: issuerMetadata
-        }
-      };
+  function handleAssetImageDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setAssetImageDragActive(false);
+    const file = event.dataTransfer.files?.[0] ?? null;
+    applyAssetImageFile(file);
+  }
 
-      setStatus("Uploading metadata to Pinata...");
-      const metadataCid = await uploadJsonToPinata(metadataPayload, env.pinataJwt, `${preset.name} metadata`);
-      const metadataUri = `ipfs://${metadataCid}`;
-      const metadataHash = ethers.keccak256(ethers.toUtf8Bytes(`${preset.name}|${metadataUri}`));
-      const notesWithIpfs = `${preset.notes}\nGenerated preview image: ${imageUri}`;
-
-      setAssetDraft({
-        name: preset.name,
-        metadataUri,
-        metadataHash,
-        notes: notesWithIpfs,
-        buyerVerificationRequirement: assetDraft.buyerVerificationRequirement,
-        deployments: preset.deployments.map((deployment) => deploymentDraftFromPresetRow(deployment))
-      });
-      setGeneratedPresetCursor((previous) => (previous + 1) % GENERATED_ASSET_PRESETS.length);
-      setStatus(`Generated real IPFS asset via Pinata: ${preset.name}`);
-    } catch (err) {
-      const message = (err as Error).message || "Unknown Pinata error";
-      setStatus(`Real IPFS generation failed: ${message}`);
-      setError(message);
-    } finally {
-      setGeneratingAsset(false);
-      setBusy(false);
+  function handleAssetImageDropzoneKeydown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openAssetImagePicker();
     }
   }
 
@@ -3415,7 +3356,49 @@ export default function App() {
     });
   }
 
-  function addAssetToQueue(event: React.FormEvent<HTMLFormElement>) {
+  function normalizeAssetDraftDeployments(): AssetDeploymentRecord[] | null {
+    if (assetDraft.deployments.length === 0) {
+      setError("Add at least one network deployment");
+      return null;
+    }
+    const normalizedDeployments: AssetDeploymentRecord[] = [];
+    for (const deployment of assetDraft.deployments) {
+      const chainValue = Number(deployment.chainId);
+      if (!Number.isInteger(chainValue) || chainValue <= 0) {
+        setError("Choose a valid network for each deployment row");
+        return null;
+      }
+
+      const tokenAddressRaw = deployment.tokenAddress.trim();
+      if (!tokenAddressRaw) {
+        setError("Every deployment row requires a contract value");
+        return null;
+      }
+
+      const normalizedTokenId = deployment.tokenId.trim() || "0";
+      if (!/^\d+$/.test(normalizedTokenId)) {
+        setError("Token ID must be an integer >= 0");
+        return null;
+      }
+
+      if (deployment.tokenStandard === "ERC20" && normalizedTokenId !== "0") {
+        setError("For ERC20 deployment rows tokenId must be 0");
+        return null;
+      }
+
+      normalizedDeployments.push({
+        chainId: chainValue,
+        // Prototype mode: allow non-checksummed and even non-EVM identifiers for UI mocking.
+        tokenAddress: ethers.isAddress(tokenAddressRaw) ? ethers.getAddress(tokenAddressRaw) : tokenAddressRaw,
+        tokenStandard: deployment.tokenStandard,
+        tokenId: normalizedTokenId
+      });
+    }
+
+    return normalizedDeployments;
+  }
+
+  async function publishAsset(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     if (!account) {
@@ -3438,102 +3421,148 @@ export default function App() {
       return;
     }
 
-    if (!assetDraft.name.trim()) {
+    if (!env.pinataJwt) {
+      setError("Missing VITE_PINATA_JWT in frontend/.env");
+      return;
+    }
+
+    const name = assetDraft.name.trim();
+    const description = assetDraft.description.trim();
+    const category = assetDraft.category;
+    const maxSupply = assetDraft.maxSupply.trim();
+    const minPrice = assetDraft.minPrice.trim();
+
+    if (!name) {
       setError("Asset name is required");
       return;
     }
-
-    if (assetDraft.deployments.length === 0) {
-      setError("Add at least one network deployment");
+    if (!description) {
+      setError("Asset description is required");
+      return;
+    }
+    if (!assetImageFile) {
+      setError("Attach an asset image");
+      return;
+    }
+    if (!assetImageFile.type.startsWith("image/")) {
+      setError("Use an image file (PNG/JPG/SVG/WebP)");
+      return;
+    }
+    if (!/^\d+$/.test(maxSupply) || BigInt(maxSupply) <= 0n) {
+      setError("Max supply must be an integer greater than 0");
+      return;
+    }
+    if (!/^\d+(\.\d+)?$/.test(minPrice) || Number(minPrice) <= 0) {
+      setError("Min price must be a positive number");
       return;
     }
 
-    if (!assetDraft.metadataUri.trim() && !assetDraft.metadataHash.trim()) {
-      setError("Add metadata URI or metadata hash");
+    const normalizedDeployments = normalizeAssetDraftDeployments();
+    if (!normalizedDeployments) {
       return;
-    }
-
-    const normalizedDeployments: AssetDeploymentRecord[] = [];
-    for (const deployment of assetDraft.deployments) {
-      const chainValue = Number(deployment.chainId);
-      if (!Number.isInteger(chainValue) || chainValue <= 0) {
-        setError("Choose a valid network for each deployment row");
-        return;
-      }
-
-      const tokenAddressRaw = deployment.tokenAddress.trim();
-      if (!tokenAddressRaw) {
-        setError("Every deployment row requires a contract value");
-        return;
-      }
-
-      const normalizedTokenId = deployment.tokenId.trim() || "0";
-      if (!/^\d+$/.test(normalizedTokenId)) {
-        setError("Token ID must be an integer >= 0");
-        return;
-      }
-
-      if (deployment.tokenStandard === "ERC20" && normalizedTokenId !== "0") {
-        setError("For ERC20 deployment rows tokenId must be 0");
-        return;
-      }
-
-      normalizedDeployments.push({
-        chainId: chainValue,
-        // Prototype mode: allow non-checksummed and even non-EVM identifiers for UI mocking.
-        tokenAddress: ethers.isAddress(tokenAddressRaw) ? ethers.getAddress(tokenAddressRaw) : tokenAddressRaw,
-        tokenStandard: deployment.tokenStandard,
-        tokenId: normalizedTokenId
-      });
     }
 
     setError("");
+    setBusy(true);
 
-    const record: RegistryRecord = {
-      id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
-      createdAt: Date.now(),
-      name: assetDraft.name.trim(),
-      metadataUri: assetDraft.metadataUri.trim(),
-      metadataHash: assetDraft.metadataHash.trim(),
-      notes: assetDraft.notes.trim(),
-      buyerVerificationRequirement: assetDraft.buyerVerificationRequirement,
-      deployments: normalizedDeployments,
-      companyLegalName: kybCompanyProfile.legalName,
-      companyRef: kybCompanyProfile.companyRef,
-      companyJurisdiction: kybCompanyProfile.jurisdiction,
-      companyWebsite: kybCompanyProfile.website,
-      kybVerifiedAt: kybCompanyProfile.verifiedAt,
-      kybRequestId: hasKybRequest ? latestKybRequestId : undefined,
-      status: "queued"
-    };
+    let createdRecord: RegistryRecord | null = null;
 
-    setRegistryQueue((previous) => [record, ...previous]);
-    setAssetDraft((previous) => ({
-      ...defaultAssetDraft(chainId || env.chainId),
-      buyerVerificationRequirement: previous.buyerVerificationRequirement
-    }));
-    setStatus(`Asset "${record.name}" added to queue for ${kybCompanyProfile.legalName}. Submit it to CRE from the queue.`);
+    try {
+      const onExpectedNetwork = await ensureExpectedNetwork();
+      if (!onExpectedNetwork) {
+        return;
+      }
+
+      const generatedAt = new Date();
+      const slug = slugifyAssetName(name);
+      const extension = assetImageFile.name.includes(".") ? assetImageFile.name.split(".").pop() ?? "" : "";
+      const safeExtension = extension.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 10);
+      const imageFileName = `${slug}-${generatedAt.getTime()}${safeExtension ? `.${safeExtension}` : ""}`;
+
+      setStatus("Uploading image to Pinata...");
+      const imageCid = await uploadFileToPinata(assetImageFile, imageFileName, env.pinataJwt, `${name} image`);
+      const imageUri = `ipfs://${imageCid}`;
+
+      const issuerMetadata = issuerMetadataFromProfile(kybCompanyProfile);
+      const metadataPayload = {
+        name,
+        description,
+        category,
+        image: imageUri,
+        buyerVerificationRequirement: assetDraft.buyerVerificationRequirement,
+        issuer: issuerMetadata,
+        attributes: [
+          { trait_type: "category", value: category },
+          { trait_type: "maxSupply", value: maxSupply },
+          { trait_type: "minPrice", value: minPrice }
+        ],
+        properties: {
+          source: "passstore-frontend",
+          generatedAt: generatedAt.toISOString(),
+          category,
+          buyerVerificationRequirement: assetDraft.buyerVerificationRequirement,
+          buyerVerificationLabel: buyerVerificationRequirementLabel(assetDraft.buyerVerificationRequirement),
+          maxSupply,
+          minPrice,
+          minprice: minPrice,
+          issuer: issuerMetadata
+        }
+      };
+
+      setStatus("Uploading metadata to Pinata...");
+      const metadataCid = await uploadJsonToPinata(metadataPayload, env.pinataJwt, `${name} metadata`);
+      const metadataUri = `ipfs://${metadataCid}`;
+      const metadataHash = ethers.keccak256(ethers.toUtf8Bytes(metadataUri));
+
+      createdRecord = {
+        id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+        createdAt: Date.now(),
+        name,
+        description,
+        category,
+        imageUri,
+        maxSupply,
+        minPrice,
+        metadataUri,
+        metadataHash,
+        buyerVerificationRequirement: assetDraft.buyerVerificationRequirement,
+        deployments: normalizedDeployments,
+        companyLegalName: kybCompanyProfile.legalName,
+        companyRef: kybCompanyProfile.companyRef,
+        companyJurisdiction: kybCompanyProfile.jurisdiction,
+        companyWebsite: kybCompanyProfile.website,
+        kybVerifiedAt: kybCompanyProfile.verifiedAt,
+        kybRequestId: hasKybRequest ? latestKybRequestId : undefined
+      };
+
+      setResolvedAssetMetadataByUri((previous) => ({
+        ...previous,
+        [metadataUri]: metadataReadySnapshot(contentUriToHttpUrl(metadataUri), metadataPayload as Record<string, unknown>)
+      }));
+      setAssetDraft((previous) => ({
+        ...defaultAssetDraft(chainId || env.chainId),
+        category: previous.category,
+        buyerVerificationRequirement: previous.buyerVerificationRequirement
+      }));
+      clearAssetImageFile();
+      setStatus(`Asset "${name}" uploaded to IPFS. Sending onchain verification request...`);
+    } catch (err) {
+      const message = (err as Error).message || "Asset publish failed";
+      setError(message);
+      setStatus(`Asset publish failed: ${message}`);
+      return;
+    } finally {
+      setBusy(false);
+    }
+
+    if (createdRecord) {
+      await submitRegistryRecord(createdRecord);
+    }
   }
 
-  function removeQueuedAsset(id: string) {
-    setRegistryQueue((previous) => previous.filter((item) => item.id !== id));
-    setStatus("Asset draft removed from queue.");
-  }
-
-  async function submitQueuedAsset(recordId: string): Promise<void> {
+  async function submitRegistryRecord(record: RegistryRecord): Promise<void> {
     if (!provider || !account) {
       setError("Connect wallet first");
-      return;
-    }
-
-    const record = registryQueue.find((item) => item.id === recordId);
-    if (!record) {
-      setError("Asset record not found");
-      return;
-    }
-
-    if (record.status === "verified") {
-      setStatus(`Asset "${record.name}" already verified.`);
       return;
     }
 
@@ -3550,10 +3579,6 @@ export default function App() {
       if (!onExpectedNetwork) {
         return;
       }
-
-      setRegistryQueue((previous) =>
-        previous.map((item) => (item.id === recordId ? { ...item, status: "submitting", lastError: undefined } : item))
-      );
 
       const { signer, address } = await getActiveSignerAndAddress();
       const { broker } = makeContracts(signer);
@@ -3572,6 +3597,7 @@ export default function App() {
       const updatedDeployments: AssetDeploymentRecord[] = [];
 
       for (const deployment of record.deployments) {
+        setStatus(`Submitting ${record.name} on ${chainName(deployment.chainId)}...`);
         if (!ethers.isAddress(deployment.tokenAddress)) {
           throw new Error(
             `Deployment ${chainName(deployment.chainId)} has non-EVM token address. Use a valid 0x address for onchain submit.`
@@ -3618,44 +3644,14 @@ export default function App() {
         });
       }
 
-      setRegistryQueue((previous) =>
-        previous.map((item) =>
-          item.id === recordId
-            ? {
-                ...item,
-                status: "submitted",
-                kybRequestId: kybRequestId.toString(),
-                deployments: updatedDeployments,
-                lastError: undefined
-              }
-            : item
-        )
-      );
-
       setStatus(`Submitted ${updatedDeployments.length} deployment request(s) for "${record.name}". Waiting CRE verification...`);
       await refreshOnchainData(address);
     } catch (err) {
       const message = (err as Error).message;
-      setRegistryQueue((previous) =>
-        previous.map((item) => (item.id === recordId ? { ...item, status: "failed", lastError: message } : item))
-      );
       setError(message);
       setStatus(`Asset submit failed: ${message}`);
     } finally {
       setBusy(false);
-    }
-  }
-
-  async function submitAllQueuedAssets(): Promise<void> {
-    const pendingIds = registryQueue.filter((item) => item.status === "queued" || item.status === "failed").map((item) => item.id);
-    if (pendingIds.length === 0) {
-      setStatus("No queued assets to submit.");
-      return;
-    }
-
-    for (const recordId of pendingIds) {
-      // Sequential submit keeps wallet confirmations deterministic.
-      await submitQueuedAsset(recordId);
     }
   }
 
@@ -3696,11 +3692,6 @@ export default function App() {
   const kybStatusLabel =
     kybStubStatus === "verified" ? "Verified" : "Not verified";
   const kybCompanyLinked = hasActiveKybFlag && Boolean(kybCompanyProfile);
-  const nextGeneratedPresetName =
-    GENERATED_ASSET_PRESETS.length > 0
-      ? GENERATED_ASSET_PRESETS[generatedPresetCursor % GENERATED_ASSET_PRESETS.length].name
-      : "Preset";
-
   const kycQuickLabel = verify.ok ? "Verified" : "Not verified";
   const kycQuickBadgeClass = verify.ok ? "ok" : "warn";
   const worldIdQuickLabel = worldIdVerified ? "Verified" : "Not verified";
@@ -3708,27 +3699,48 @@ export default function App() {
   const kybQuickLabel = hasActiveKybFlag ? "Verified" : "Not verified";
   const kybQuickBadgeClass = hasActiveKybFlag ? "ok" : "warn";
 
-  const availableAssetsBase = 3;
-  const availableAssetsKyc = 10;
-  const availableAssetsWorldId = 2;
-  const availableAssetsKyb = 3;
-  const availableAssetsMax = availableAssetsBase + availableAssetsKyc + availableAssetsWorldId + availableAssetsKyb;
-  const availableAssetsCount =
-    availableAssetsBase +
-    (verify.ok ? availableAssetsKyc : 0) +
-    (worldIdVerified ? availableAssetsWorldId : 0) +
-    (hasActiveKybFlag ? availableAssetsKyb : 0);
-  const availableAssetsPercent = availableAssetsMax > 0 ? Math.round((availableAssetsCount / availableAssetsMax) * 100) : 0;
-
   const catalogTotalAssets = catalogAssetsCombined.length;
   const catalogAvailableCount = catalogAssetsCombined.filter((asset) =>
     buyerVerificationRequirementSatisfied(assetVerificationRequirement(asset), verify.ok, worldIdVerified)
   ).length;
   const catalogAvailablePercent =
     catalogTotalAssets > 0 ? Math.round((catalogAvailableCount / catalogTotalAssets) * 100) : 0;
-  const pieCount = catalogTotalAssets > 0 ? catalogAvailableCount : availableAssetsCount;
-  const pieTotal = catalogTotalAssets > 0 ? catalogTotalAssets : availableAssetsMax;
-  const piePercent = catalogTotalAssets > 0 ? catalogAvailablePercent : availableAssetsPercent;
+  const pieCount = catalogAvailableCount;
+  const piePercent = catalogAvailablePercent;
+  const filteredCatalogAssets = catalogAssetsCombined.filter(
+    (asset) => assetsCatalogCategory === "all" || asset.category === assetsCatalogCategory
+  );
+  const selectedAssetRequirement: BuyerVerificationRequirement =
+    selectedCatalogAsset ? assetVerificationRequirement(selectedCatalogAsset) : "open";
+  const selectedAssetAvailable = selectedCatalogAsset
+    ? buyerVerificationRequirementSatisfied(selectedAssetRequirement, verify.ok, worldIdVerified)
+    : true;
+  const selectedAssetRequirementHelp = selectedCatalogAsset
+    ? buyerVerificationRequirementHelpText(selectedAssetRequirement)
+    : "";
+  const selectedMetadataSnapshot = selectedCatalogAsset
+    ? resolvedAssetMetadataByUri[selectedCatalogAsset.metadataUri]
+    : undefined;
+  const selectedMetadataHttpUrl = selectedCatalogAsset
+    ? selectedMetadataSnapshot?.metadataHttpUrl || contentUriToHttpUrl(selectedCatalogAsset.metadataUri)
+    : "";
+  const selectedMetadataGatewayUrls = selectedCatalogAsset
+    ? contentUriToHttpUrls(selectedCatalogAsset.metadataUri)
+    : [];
+  const selectedImageHttpUrl = selectedCatalogAsset
+    ? selectedMetadataSnapshot?.imageHttpUrl || selectedCatalogAsset.image || ""
+    : "";
+  const selectedAssetPublishedLabel = selectedCatalogAsset
+    ? (selectedCatalogAsset.publishedAt > 0 ? formatUnixTimestamp(selectedCatalogAsset.publishedAt) : "—")
+    : "—";
+  const selectedDeploymentsWithLinks = selectedCatalogAsset
+    ? selectedCatalogAsset.deployments.map((deployment) => ({
+        ...deployment,
+        networkName: chainName(deployment.chainId),
+        contractExplorer: contractExplorerUrl(deployment.chainId, deployment.tokenAddress)
+      }))
+    : [];
+  const assetDetailEnabled = true;
 
   const kybActionCompleted = hasActiveKybFlag || kybStubStatus === "verified";
   const kybCompanyProfileVisible = kybActionCompleted;
@@ -3746,7 +3758,6 @@ export default function App() {
 
   const globalBusy = busy || waitingPacket || refreshingStatus || syncWaiting;
   const progressCopy = getProgressCopy(status, waitingPacket, refreshingStatus, syncWaiting);
-  const isDarkTheme = uiTheme === "dark";
   const assetsReadProvider = publicReadProvider ?? provider ?? null;
   const wantsMineAssets = assetsViewMode === "mine" && Boolean(account);
   const canReadPublicAssets = Boolean(assetsReadProvider);
@@ -4176,24 +4187,6 @@ export default function App() {
           </p>
         </div>
         <div className="hero-actions">
-          <button
-            className={`theme-toggle-btn${isDarkTheme ? " is-dark" : ""}`}
-            type="button"
-            onClick={() => setUiTheme((previous) => (previous === "dark" ? "light" : "dark"))}
-            aria-pressed={isDarkTheme}
-            title={`Switch to ${isDarkTheme ? "light" : "dark"} theme`}
-          >
-            <span className="theme-toggle-track" aria-hidden="true">
-              <span className="theme-toggle-thumb" />
-            </span>
-            <span className="theme-toggle-text">{isDarkTheme ? "Dark" : "Light"}</span>
-          </button>
-          <button className="btn" onClick={() => void refreshStatusWithRetry()} disabled={busy || !account || networkMismatch}>
-            Check status
-          </button>
-          <button className="btn primary" onClick={connectWallet} disabled={busy}>
-            {walletButtonLabel}
-          </button>
           <div className="hero-assets-pie" aria-label="Available assets">
             <div
               className="hero-assets-pie-ring"
@@ -4205,26 +4198,31 @@ export default function App() {
               Available assets{catalogTotalAssets > 0 ? ` (${pieCount}/${catalogTotalAssets})` : ""}
             </span>
           </div>
+          <button className="btn primary" onClick={connectWallet} disabled={busy}>
+            {walletButtonLabel}
+          </button>
         </div>
       </header>
 
       <section className="card section-tabs-card" aria-label="Console sections">
         <div className="section-tabs">
           <button
-            className={`section-tab ${activeTab === "personal" ? "active" : ""}`}
-            onClick={() => setActiveTab("personal")}
-            aria-pressed={activeTab === "personal"}
-            type="button"
-          >
-            <span>Pass Portal</span>
-          </button>
-          <button
             className={`section-tab ${activeTab === "assets" ? "active" : ""}`}
             onClick={() => setActiveTab("assets")}
             aria-pressed={activeTab === "assets"}
             type="button"
           >
-            <span>Assets</span>
+            <span className="section-tab-material-icon material-symbols-rounded" aria-hidden="true">inventory_2</span>
+            <span className="section-tab-label">Assets</span>
+          </button>
+          <button
+            className={`section-tab ${activeTab === "personal" ? "active" : ""}`}
+            onClick={() => setActiveTab("personal")}
+            aria-pressed={activeTab === "personal"}
+            type="button"
+          >
+            <span className="section-tab-material-icon material-symbols-rounded" aria-hidden="true">verified_user</span>
+            <span className="section-tab-label">Personal Verifications</span>
           </button>
           <button
             className={`section-tab ${activeTab === "business" ? "active" : ""}`}
@@ -4232,7 +4230,17 @@ export default function App() {
             aria-pressed={activeTab === "business"}
             type="button"
           >
-            <span>Business</span>
+            <span className="section-tab-material-icon material-symbols-rounded" aria-hidden="true">domain_verification</span>
+            <span className="section-tab-label">Company Verification</span>
+          </button>
+          <button
+            className={`section-tab section-tab-group-break ${activeTab === "integrations" ? "active" : ""}`}
+            onClick={() => setActiveTab("integrations")}
+            aria-pressed={activeTab === "integrations"}
+            type="button"
+          >
+            <span className="section-tab-material-icon material-symbols-rounded" aria-hidden="true">integration_instructions</span>
+            <span className="section-tab-label">Integrations</span>
           </button>
           <button
             className={`section-tab ${activeTab === "checkers" ? "active" : ""}`}
@@ -4240,15 +4248,8 @@ export default function App() {
             aria-pressed={activeTab === "checkers"}
             type="button"
           >
-            <span>Checkers</span>
-          </button>
-          <button
-            className={`section-tab ${activeTab === "integrations" ? "active" : ""}`}
-            onClick={() => setActiveTab("integrations")}
-            aria-pressed={activeTab === "integrations"}
-            type="button"
-          >
-            <span>Integrations</span>
+            <span className="section-tab-material-icon material-symbols-rounded" aria-hidden="true">fact_check</span>
+            <span className="section-tab-label">Checkers</span>
           </button>
         </div>
       </section>
@@ -4484,11 +4485,33 @@ export default function App() {
       ) : null}
 
       {activeTab === "personal" || activeTab === "business" ? (
-      <section className="tab-section-group" aria-label={activeTab === "personal" ? "Pass Portal" : "Business verification"}>
+      <section className="tab-section-group" aria-label={activeTab === "personal" ? "Personal verifications" : "Company verification"}>
       <div className="queue-head tab-section-head">
-        <h3>{activeTab === "personal" ? "Pass Portal" : "Business Verification"}</h3>
+        <h3>{activeTab === "personal" ? "Personal Verifications" : "Company Verification"}</h3>
+        {activeTab === "personal" ? (
+          <div className="personal-view-toggle" role="group" aria-label="Personal verifications layout">
+            <button
+              type="button"
+              className={`personal-view-toggle-btn ${personalCardsView === "list" ? "active" : ""}`}
+              onClick={() => setPersonalCardsView("list")}
+              aria-pressed={personalCardsView === "list"}
+              title="List view"
+            >
+              <span className="material-symbols-rounded" aria-hidden="true">view_list</span>
+            </button>
+            <button
+              type="button"
+              className={`personal-view-toggle-btn ${personalCardsView === "grid" ? "active" : ""}`}
+              onClick={() => setPersonalCardsView("grid")}
+              aria-pressed={personalCardsView === "grid"}
+              title="Tile view"
+            >
+              <span className="material-symbols-rounded" aria-hidden="true">grid_view</span>
+            </button>
+          </div>
+        ) : null}
       </div>
-      <section className="pass-portal-cards">
+      <section className={`pass-portal-cards${activeTab === "personal" ? ` is-${personalCardsView}` : ""}`}>
         {activeTab === "personal" ? (
         <article className="card wallet-card">
           <div className="card-head">
@@ -4753,160 +4776,219 @@ export default function App() {
         <div className="queue-head tab-section-head">
           <h3>Assets</h3>
         </div>
-        {catalogLoading ? (
-          <p className="empty-state">Loading assets catalog…</p>
-        ) : catalogError ? (
-          <p className="empty-state text-warn">{catalogError}</p>
-        ) : catalogData ? (
-          selectedCatalogAsset ? (
-            <div className="asset-detail-view">
-              <button
-                type="button"
-                className="asset-detail-back"
-                onClick={() => setSelectedCatalogAsset(null)}
-              >
-                ← Back to Marketplace
-              </button>
-              <div className="asset-detail-main">
-                <div className="asset-detail-hero asset-detail-hero-small">
-                  <div className="asset-detail-hero-media">
-                    <img
-                      src={selectedCatalogAsset.image}
-                      alt=""
-                      onError={(e: SyntheticEvent<HTMLImageElement>) => {
-                        e.currentTarget.style.display = "none";
-                      }}
+        {assetDetailEnabled && selectedCatalogAsset ? (
+          <div className="asset-detail-view">
+            <button
+              type="button"
+              className="asset-detail-back"
+              onClick={() => setSelectedCatalogAsset(null)}
+            >
+              ← Back to Marketplace
+            </button>
+            <div className="asset-detail-main">
+              <div className="asset-detail-hero asset-detail-hero-small">
+                <div className="asset-detail-hero-media">
+	                  <img
+	                    src={selectedCatalogAsset.image}
+	                    alt=""
+	                    onError={(e: SyntheticEvent<HTMLImageElement>) => {
+	                      e.currentTarget.style.display = "none";
+	                    }}
+	                  />
+	                </div>
+	              </div>
+	              <div className="asset-detail-panel card">
+	                <span className="badge neutral">{selectedCatalogAsset.category}</span>
+	                <h2 className="asset-detail-title">{selectedCatalogAsset.name}</h2>
+	                <p className="asset-detail-issuer">Issued by {selectedCatalogAsset.subname}</p>
+	                <p className="asset-detail-description">
+	                  {selectedCatalogAsset.description || "Description is unavailable for this asset."}
+	                </p>
+	                <dl className="asset-detail-facts">
+	                  <div>
+	                    <dt>Legal name</dt>
+	                    <dd>{selectedCatalogAsset.legalName || "—"}</dd>
+	                  </div>
+	                  <div>
+	                    <dt>Company ref</dt>
+	                    <dd>{selectedCatalogAsset.companyRef || "—"}</dd>
+	                  </div>
+	                  <div>
+	                    <dt>Publisher</dt>
+	                    <dd className="mono asset-detail-address">{selectedCatalogAsset.publisher}</dd>
+	                  </div>
+	                  <div>
+	                    <dt>Published</dt>
+	                    <dd>{selectedAssetPublishedLabel}</dd>
+	                  </div>
+	                  <div>
+	                    <dt>Buyer access</dt>
+	                    <dd>{buyerVerificationRequirementLabel(selectedAssetRequirement)}</dd>
+	                  </div>
+	                </dl>
+	                <div className="asset-detail-info-grid">
+	                  <div className="asset-detail-info-box">
+	                    <span className="asset-detail-info-label">Init. Price</span>
+	                    <strong>{selectedCatalogAsset.priceUSDx > 0 ? `$${selectedCatalogAsset.priceUSDx}` : "—"}</strong>
+	                  </div>
+	                  <div className="asset-detail-info-box highlight">
+	                    <span className="asset-detail-info-label">Total/Max Supply</span>
+	                    <strong>
+	                      {selectedCatalogAsset.supplyForDemo
+	                        ? selectedCatalogAsset.supplyForDemo.toLocaleString()
+	                        : "Unlimited"}
+	                    </strong>
+	                  </div>
+	                </div>
+                <div className="asset-detail-amount-row">
+                  <label>
+                    <span className="asset-detail-info-label">Amount</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={assetDetailAmount}
+                      onChange={(e) => setAssetDetailAmount(e.target.value)}
                     />
-                  </div>
-                  <div className="asset-detail-trust-badge">
-                    Trust Score: {selectedCatalogAsset.healthScore}/100
-                  </div>
+                  </label>
+                  <span className="asset-detail-tokens-label">Tokens</span>
                 </div>
-                <div className="asset-detail-panel card">
-                  <span className="badge neutral">{selectedCatalogAsset.category}</span>
-                  <h2 className="asset-detail-title">{selectedCatalogAsset.name}</h2>
-                  <p className="asset-detail-issuer">Issued by {selectedCatalogAsset.subname}</p>
-                  <div className="asset-detail-info-grid">
-                    <div className="asset-detail-info-box">
-                      <span className="asset-detail-info-label">Price per Token</span>
-                      <strong>{selectedCatalogAsset.priceUSDx} USDC</strong>
-                    </div>
-                    <div className="asset-detail-info-box highlight">
-                      <span className="asset-detail-info-label">Est. APR</span>
-                      <strong>
-                        {typeof selectedCatalogAsset.apr === "number"
-                          ? `${selectedCatalogAsset.apr}%`
-                          : "Variable"}
-                      </strong>
-                    </div>
-                  </div>
-                  <div className="asset-detail-amount-row">
-                    <label>
-                      <span className="asset-detail-info-label">Amount</span>
-                      <input
-                        type="number"
-                        min={1}
-                        value={assetDetailAmount}
-                        onChange={(e) => setAssetDetailAmount(e.target.value)}
-                      />
-                    </label>
-                    <span className="asset-detail-tokens-label">Tokens</span>
-                  </div>
-                  <p className="asset-detail-available">
-                    Available:{" "}
-                    {selectedCatalogAsset.supplyForDemo
-                      ? selectedCatalogAsset.supplyForDemo.toLocaleString()
-                      : "Unlimited"}
-                  </p>
-                  <p className="asset-detail-total">
-                    Total Cost:{" "}
-                    <strong>
-                      {(Number(assetDetailAmount) || 0) * selectedCatalogAsset.priceUSDx} USDC
-                    </strong>
-                  </p>
-                  <button
-                    type="button"
-                    className="btn primary asset-detail-buy-btn"
-                    onClick={() =>
-                      setStatus(`Buy ${assetDetailAmount} token(s) of ${selectedCatalogAsset.name} — coming soon.`)
-                    }
-                  >
-                    Buy Token
-                  </button>
-                  <div className="asset-detail-metadata-inline">
-                    <h3 className="asset-detail-metadata-title">Asset Metadata</h3>
-                    <dl className="asset-detail-metadata-dl">
-                      <div>
-                        <dt>Network</dt>
-                        <dd>{catalogData.networks[String(selectedCatalogAsset.chainId)]?.name ?? `Chain ${selectedCatalogAsset.chainId}`}</dd>
-                      </div>
-                      <div>
-                        <dt>Token Type</dt>
-                        <dd>ERC-1155</dd>
-                      </div>
-                      <div>
-                        <dt>Tokens Issued</dt>
-                        <dd>{selectedCatalogAsset.supplyForDemo ? selectedCatalogAsset.supplyForDemo.toLocaleString() : "Unlimited"}</dd>
-                      </div>
-                      <div>
-                        <dt>Contract</dt>
-                        <dd>
-                          <a href="#" onClick={(e) => e.preventDefault()}>
-                            {selectedCatalogAsset.contract
-                              ? `${selectedCatalogAsset.contract.slice(0, 6)}...${selectedCatalogAsset.contract.slice(-4)}`
-                              : "—"}
-                          </a>
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Attestation</dt>
-                        <dd>
-                          <a href="#" onClick={(e) => e.preventDefault()}>
-                            IPFS
-                          </a>
-                        </dd>
-                      </div>
-                    </dl>
-                  </div>
-                </div>
-              </div>
-              <div className="asset-detail-chart card">
-                <div className="asset-detail-chart-header">
-                  <div>
-                    <p className="asset-detail-chart-price">{selectedCatalogAsset.priceUSDx} USDC</p>
-                    <p className="asset-detail-chart-change">↑ +4.2% (Past Month)</p>
-                  </div>
-                  <div className="asset-detail-chart-ranges">
-                    {(["24h", "Week", "Month", "Year", "All time"] as const).map((range) => (
-                      <button key={range} type="button" className={range === "Month" ? "active" : ""}>
-                        {range}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="asset-detail-chart-placeholder" aria-hidden="true">
-                  <svg viewBox="0 0 400 120" preserveAspectRatio="none">
-                    <defs>
-                      <linearGradient id="chart-fill" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="rgb(34, 197, 94)" stopOpacity="0.4" />
-                        <stop offset="100%" stopColor="rgb(34, 197, 94)" stopOpacity="0" />
-                      </linearGradient>
-                    </defs>
-                    <path
-                      fill="url(#chart-fill)"
-                      d="M 0 100 Q 50 80 100 70 T 200 50 T 300 35 T 400 20 L 400 120 L 0 120 Z"
-                    />
-                    <path
-                      fill="none"
-                      stroke="rgb(34, 197, 94)"
-                      strokeWidth="2"
-                      d="M 0 100 Q 50 80 100 70 T 200 50 T 300 35 T 400 20"
-                    />
-                  </svg>
-                </div>
-              </div>
-            </div>
-          ) : (
+                <p className="asset-detail-available">
+                  Available:{" "}
+                  {selectedCatalogAsset.supplyForDemo
+                    ? selectedCatalogAsset.supplyForDemo.toLocaleString()
+                    : "Unlimited"}
+                </p>
+                <p className="asset-detail-total">
+                  Total Cost:{" "}
+                  <strong>
+                    {(Number(assetDetailAmount) || 0) * selectedCatalogAsset.priceUSDx} USDC
+                  </strong>
+                </p>
+                <button
+                  type="button"
+                  className="btn primary asset-detail-buy-btn"
+                  disabled={!selectedAssetAvailable}
+                  onClick={() =>
+                    setStatus(
+                      selectedAssetAvailable
+                        ? `Buy ${assetDetailAmount} token(s) of ${selectedCatalogAsset.name} — coming soon.`
+                        : `Asset "${selectedCatalogAsset.name}" is unavailable: ${selectedAssetRequirementHelp}.`
+                    )
+                  }
+                >
+                  {selectedAssetAvailable ? "Buy Token" : "Unavailable"}
+                </button>
+                {!selectedAssetAvailable ? (
+                  <p className="asset-detail-total">Unavailable now: <strong>{selectedAssetRequirementHelp}</strong></p>
+                ) : null}
+	                <div className="asset-detail-metadata-inline">
+	                  <h3 className="asset-detail-metadata-title">Asset Metadata</h3>
+	                    <dl className="asset-detail-metadata-dl">
+	                      <div>
+	                        <dt>Networks</dt>
+	                        <dd>
+	                          {Array.from(new Set(selectedCatalogAsset.deployments.map((deployment) => chainName(deployment.chainId)))).join(" · ") || "—"}
+	                        </dd>
+	                      </div>
+	                      <div>
+	                        <dt>Token Type</dt>
+	                        <dd>{Array.from(new Set(selectedCatalogAsset.deployments.map((deployment) => deployment.tokenStandard))).join(" / ") || "—"}</dd>
+	                      </div>
+	                      <div>
+	                        <dt>Tokens Issued</dt>
+	                        <dd>{selectedCatalogAsset.supplyForDemo ? selectedCatalogAsset.supplyForDemo.toLocaleString() : "Unlimited"}</dd>
+	                      </div>
+	                      <div>
+	                        <dt>Metadata URI</dt>
+	                        <dd>
+	                          {selectedCatalogAsset.metadataUri ? (
+	                            <span className="mono asset-detail-break">{selectedCatalogAsset.metadataUri}</span>
+	                          ) : "—"}
+	                        </dd>
+	                      </div>
+	                      <div>
+	                        <dt>Metadata Hash</dt>
+	                        <dd>{selectedCatalogAsset.metadataHash ? <span className="mono asset-detail-break">{selectedCatalogAsset.metadataHash}</span> : "—"}</dd>
+	                      </div>
+	                      <div>
+	                        <dt>Metadata Link</dt>
+	                        <dd>
+	                          {selectedMetadataHttpUrl ? (
+	                            <a href={selectedMetadataHttpUrl} target="_blank" rel="noreferrer">
+	                              Open metadata
+	                            </a>
+	                          ) : "—"}
+	                        </dd>
+	                      </div>
+	                      <div>
+	                        <dt>Image Link</dt>
+	                        <dd>
+	                          {selectedImageHttpUrl ? (
+	                            <a href={selectedImageHttpUrl} target="_blank" rel="noreferrer">
+	                              Open image
+	                            </a>
+	                          ) : "—"}
+	                        </dd>
+	                      </div>
+	                      <div>
+	                        <dt>Status</dt>
+	                      <dd>
+	                        {selectedMetadataSnapshot?.status === "ready"
+	                          ? "Metadata resolved"
+	                          : selectedMetadataSnapshot?.status === "loading"
+	                            ? "Metadata loading"
+	                            : selectedMetadataSnapshot?.status === "error"
+	                              ? "Metadata unavailable"
+	                              : "Not requested"}
+	                      </dd>
+	                      </div>
+	                  </dl>
+	                </div>
+	              </div>
+	            </div>
+	            <div className="asset-detail-chart card">
+	              <div className="asset-detail-chart-header">
+	                <div>
+	                  <p className="asset-detail-chart-price">Deployments & Links</p>
+	                  <p className="asset-detail-chart-change">
+	                    {selectedDeploymentsWithLinks.length} network{selectedDeploymentsWithLinks.length === 1 ? "" : "s"}
+	                  </p>
+	                </div>
+	              </div>
+	              <div className="asset-detail-deployments">
+	                {selectedDeploymentsWithLinks.map((deployment) => (
+	                  <div className="asset-detail-deployment-row" key={`${deployment.assetKey}:${deployment.chainId}`}>
+	                    <strong>{deployment.networkName}</strong>
+	                    <span>{deployment.tokenStandard}{deployment.tokenStandard === "ERC20" ? "" : ` · #${deployment.tokenId}`}</span>
+	                    {deployment.contractExplorer ? (
+	                      <a href={deployment.contractExplorer} target="_blank" rel="noreferrer" className="mono asset-detail-break">
+	                        {deployment.tokenAddress}
+	                      </a>
+	                    ) : (
+	                      <span className="mono asset-detail-break">{deployment.tokenAddress}</span>
+	                    )}
+	                  </div>
+	                ))}
+	              </div>
+	              <div className="asset-detail-links-block">
+	                <h4>IPFS Gateways</h4>
+	                {selectedMetadataGatewayUrls.length === 0 ? (
+	                  <p className="hint">No gateway links available for this metadata URI.</p>
+	                ) : (
+	                  <ul className="asset-detail-links-list">
+	                    {selectedMetadataGatewayUrls.map((url) => (
+	                      <li key={url}>
+	                        <a href={url} target="_blank" rel="noreferrer" className="mono asset-detail-break">
+	                          {url}
+	                        </a>
+	                      </li>
+	                    ))}
+	                  </ul>
+	                )}
+	              </div>
+	            </div>
+	          </div>
+        ) : (
           <>
             <div className="assets-catalog-filters" role="group" aria-label="Category filter">
               <button
@@ -4916,9 +4998,7 @@ export default function App() {
               >
                 All
               </button>
-              {Array.from(
-                new Set(catalogAssetsCombined.map((a) => a.category).filter(Boolean))
-              )
+              {Array.from(new Set(catalogAssetsCombined.map((a) => a.category).filter(Boolean)))
                 .sort((a, b) => a.localeCompare(b))
                 .map((cat) => (
                   <button
@@ -4931,33 +5011,43 @@ export default function App() {
                   </button>
                 ))}
             </div>
-            <div className="assets-catalog-grid">
-              {catalogAssetsCombined
-                .filter(
-                  (asset) =>
-                    assetsCatalogCategory === "all" || asset.category === assetsCatalogCategory
-                )
-                .map((asset) => {
-                  const network = catalogData.networks[String(asset.chainId)];
-                  const networkName = network?.name ?? `Chain ${asset.chainId}`;
-                  const networkIconPath = getNetworkIconPath(asset.chainId);
+            {filteredCatalogAssets.length === 0 ? (
+              <p className="empty-state">No verified assets yet. Publish and verify an asset to see it here.</p>
+            ) : (
+              <div className="assets-catalog-grid">
+                {filteredCatalogAssets.map((asset) => {
+                  const networkDeployments = Array.from(
+                    new Map(
+                      asset.deployments.map((deployment) => [
+                        `${deployment.chainId}:${deployment.tokenAddress.toLowerCase()}`,
+                        deployment
+                      ])
+                    ).values()
+                  );
                   const requirement = assetVerificationRequirement(asset);
                   const kycOk = verify.ok;
                   const worldIdOk = worldIdVerified;
+                  const availableForBuyer = buyerVerificationRequirementSatisfied(requirement, kycOk, worldIdOk);
+                  const requirementHelpText = buyerVerificationRequirementHelpText(requirement);
                   const showKyc = requirement === "kyc" || requirement === "kyc_worldid";
                   const showWorldId = requirement === "worldid" || requirement === "kyc_worldid";
                   const kycBadgeClass = showKyc ? (kycOk ? "ok" : "warn") : "";
                   const worldIdBadgeClass = showWorldId ? (worldIdOk ? "ok" : "warn") : "";
+                  const supplyLabel = asset.supplyForDemo > 0 ? asset.supplyForDemo.toLocaleString() : "Unlimited";
+                  const priceLabel = asset.priceUSDx > 0 ? `$${asset.priceUSDx}` : "—";
+                  const publishDateLabel = asset.publishedAt > 0 ? formatUnixTimestamp(asset.publishedAt) : "—";
+                  const legalNameLabel = asset.legalName?.trim() || "—";
+                  const companyRefLabel = asset.companyRef?.trim() || "—";
                   return (
                     <article
-                      key={`${asset.chainId}-${asset.contract}-${asset.tokenId}`}
-                      className="assets-catalog-card card"
+                      key={asset.groupId}
+                      className={`assets-catalog-card card${availableForBuyer ? "" : " is-locked"}`}
                       role="button"
                       tabIndex={0}
                       onClick={() => setSelectedCatalogAsset(asset)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
                           setSelectedCatalogAsset(asset);
                         }
                       }}
@@ -4971,39 +5061,99 @@ export default function App() {
                             target.style.display = "none";
                           }}
                         />
-                        <span className="assets-catalog-card-network" title={networkName}>
-                          <img src={networkIconPath} alt="" width={24} height={24} />
-                        </span>
+                        <div className="assets-catalog-card-networks">
+                          {networkDeployments.map((deployment) => {
+                            const networkName = chainName(deployment.chainId);
+                            const networkIconPath = getNetworkIconPath(deployment.chainId);
+                            const explorerUrl = contractExplorerUrl(deployment.chainId, deployment.tokenAddress);
+                            const tooltipLabel = `${networkName} · ${deployment.tokenAddress}`;
+                            return (
+                              <span className="assets-catalog-card-network-wrap" key={`${asset.groupId}:${deployment.assetKey}`}>
+                                {explorerUrl ? (
+                                  <a
+                                    className="assets-catalog-card-network"
+                                    href={explorerUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    title={tooltipLabel}
+                                    onClick={(event) => event.stopPropagation()}
+                                  >
+                                    <img src={networkIconPath} alt="" width={24} height={24} />
+                                  </a>
+                                ) : (
+                                  <span className="assets-catalog-card-network" title={tooltipLabel}>
+                                    <img src={networkIconPath} alt="" width={24} height={24} />
+                                  </span>
+                                )}
+                                <span className="assets-catalog-card-network-tooltip" role="tooltip">
+                                  <strong>{networkName}</strong>
+                                  <span className="mono">{deployment.tokenAddress}</span>
+                                </span>
+                              </span>
+                            );
+                          })}
+                        </div>
+                        <span className="assets-catalog-card-type-badge">{asset.category}</span>
                       </div>
                       <div className="assets-catalog-card-body">
-                        <h3 className="assets-catalog-card-title">{asset.name}</h3>
-                        <p className="assets-catalog-card-subname">{asset.subname}</p>
-                        <div className="assets-catalog-card-verification">
-                          {showKyc ? (
-                            <span className={`badge ${kycBadgeClass}`}>KYC</span>
-                          ) : null}
-                          {showWorldId ? (
-                            <span className={`badge ${worldIdBadgeClass}`}>World ID</span>
-                          ) : null}
+                        <div className="assets-catalog-card-facts">
+                          <p className="assets-catalog-card-fact">
+                            <strong>Legal name:</strong> {legalNameLabel}
+                          </p>
+                          <p className="assets-catalog-card-fact">
+                            <strong>Company ref:</strong> {companyRefLabel}
+                          </p>
+                          <p className="assets-catalog-card-fact" title={asset.publisher}>
+                            <strong>Publisher:</strong>{" "}
+                            <span className="mono assets-catalog-card-publisher-full">{asset.publisher}</span>
+                          </p>
+                          <p className="assets-catalog-card-fact">
+                            <strong>Published:</strong> {publishDateLabel}
+                          </p>
                         </div>
+                        <h3 className="assets-catalog-card-title">{asset.name}</h3>
+                        <p className="assets-catalog-card-desc">{asset.description || "Description will appear after metadata fetch."}</p>
+                        <div className="assets-catalog-kpis">
+                          <div className="assets-catalog-kpi">
+                            <span className="assets-catalog-kpi-label">Init. Price</span>
+                            <strong className="assets-catalog-kpi-value">{priceLabel}</strong>
+                          </div>
+                          <div className="assets-catalog-kpi">
+                            <span className="assets-catalog-kpi-label">Total/Max Supply</span>
+                            <strong className="assets-catalog-kpi-value">{supplyLabel}</strong>
+                          </div>
+                        </div>
+                        <div className="assets-catalog-card-verification">
+                          {requirement === "open" ? (
+                            <span className="badge neutral">OPEN</span>
+                          ) : (
+                            <>
+                              {showKyc ? <span className={`badge ${kycBadgeClass}`}>KYC</span> : null}
+                              {showWorldId ? <span className={`badge ${worldIdBadgeClass}`}>World ID</span> : null}
+                            </>
+                          )}
+                        </div>
+                        {!availableForBuyer ? (
+                          <p className="assets-catalog-card-access">Unavailable now: {requirementHelpText}.</p>
+                        ) : null}
                         <button
                           type="button"
                           className="btn primary btn-slim"
                           onClick={(e) => {
                             e.stopPropagation();
-                            setStatus(`Buy flow for ${asset.name} — coming soon.`);
+                            setSelectedCatalogAsset(asset);
                           }}
                         >
-                          Buy
+                          View
                         </button>
                       </div>
                     </article>
                   );
                 })}
-            </div>
+              </div>
+            )}
           </>
-          )
-        ) : null}
+        )}
       </section>
       ) : null}
 
@@ -5013,77 +5163,156 @@ export default function App() {
           <>
           <div className="card-head">
             <h2>Asset Registry Intake</h2>
-            <span className={`badge ${verify.ok && hasActiveKybFlag ? "ok" : "warn"}`}>
-              {verify.ok && hasActiveKybFlag ? "Ready" : "Locked"}
-            </span>
+            <div className="card-head-badges">
+              <span className={`badge ${verify.ok && hasActiveKybFlag ? "ok" : "warn"}`}>
+                {verify.ok && hasActiveKybFlag ? "Ready" : "Locked"}
+              </span>
+              <button
+                type="button"
+                className="btn btn-slim registry-intake-toggle"
+                onClick={() => setAssetRegistryIntakeVisible((previous) => !previous)}
+              >
+                {assetRegistryIntakeVisible ? "Hide" : "Show"}
+              </button>
+            </div>
           </div>
+          {assetRegistryIntakeVisible ? (
           <p className="card-text">
-            Add only real assets here. Issuer company is pulled from KYB and submissions are queued before onchain send.
+            Add real assets here. Issuer company is pulled from KYB, metadata is uploaded to IPFS, then verification requests are sent onchain.
           </p>
+          ) : null}
           </>
         ) : null}
 
-        {activeTab === "business" ? (
+        {activeTab === "business" && assetRegistryIntakeVisible ? (
         <>
         {assetRegistryIntakeLocked ? <p className="registry-lock-note">{assetRegistryIntakeLockReason}</p> : null}
-        <form className={`registry-form${assetRegistryIntakeLocked ? " registry-intake-disabled" : ""}`} onSubmit={addAssetToQueue}>
-          <div className="registry-top-grid full-width">
+        <form className={`registry-form${assetRegistryIntakeLocked ? " registry-intake-disabled" : ""}`} onSubmit={publishAsset}>
+          <div className="registry-intake-stack full-width">
             <div className="registry-block">
               <div className="registry-block-head">
                 <h3>Asset Details</h3>
               </div>
-              <div className="registry-details-grid">
-                <label>
-                  Asset name
-                  <input
-                    value={assetDraft.name}
-                    onChange={(event) => updateDraft("name", event.target.value)}
-                    placeholder="Example: Stadium Ticket Pass"
-                  />
-                </label>
+              <div className="registry-details-split">
+                <div className="registry-details-fields">
+                  <label>
+                    Asset name
+                    <input
+                      value={assetDraft.name}
+                      onChange={(event) => updateDraft("name", event.target.value)}
+                      placeholder="Example: Stadium Ticket Pass"
+                    />
+                  </label>
 
-                <label>
-                  Metadata URI
-                  <input
-                    value={assetDraft.metadataUri}
-                    onChange={(event) => updateDraft("metadataUri", event.target.value)}
-                    placeholder="ipfs://... or https://..."
-                  />
-                </label>
+                  <label>
+                    Category
+                    <select
+                      value={assetDraft.category}
+                      onChange={(event) => updateDraft("category", event.target.value as AssetCategory)}
+                    >
+                      {ASSET_CATEGORY_OPTIONS.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
 
-                <label>
-                  Metadata hash
-                  <input
-                    value={assetDraft.metadataHash}
-                    onChange={(event) => updateDraft("metadataHash", event.target.value)}
-                    placeholder="0x..."
-                  />
-                </label>
+                  <label>
+                    Max supply
+                    <input
+                      value={assetDraft.maxSupply}
+                      onChange={(event) => updateDraft("maxSupply", event.target.value)}
+                      placeholder="1000000"
+                      inputMode="numeric"
+                    />
+                  </label>
 
-                <label>
-                  Buyer verification
-                  <select
-                    value={assetDraft.buyerVerificationRequirement}
-                    onChange={(event) =>
-                      updateDraft("buyerVerificationRequirement", event.target.value as BuyerVerificationRequirement)
-                    }
+                  <label>
+                    Min price (USD)
+                    <input
+                      value={assetDraft.minPrice}
+                      onChange={(event) => updateDraft("minPrice", event.target.value)}
+                      placeholder="10.00"
+                      inputMode="decimal"
+                    />
+                  </label>
+
+                  <label className="registry-field-full">
+                    Buyer verification
+                    <select
+                      value={assetDraft.buyerVerificationRequirement}
+                      onChange={(event) =>
+                        updateDraft("buyerVerificationRequirement", event.target.value as BuyerVerificationRequirement)
+                      }
+                    >
+                      <option value="open">Open (no verification)</option>
+                      <option value="kyc">KYC</option>
+                      <option value="worldid">World ID</option>
+                      <option value="kyc_worldid">KYC + World ID</option>
+                    </select>
+                  </label>
+
+                  <label className="registry-field-full">
+                    Description
+                    <textarea
+                      value={assetDraft.description}
+                      onChange={(event) => updateDraft("description", event.target.value)}
+                      placeholder="Short description for buyers"
+                      rows={5}
+                    />
+                  </label>
+                </div>
+
+                <div className="registry-image-panel">
+                  <input
+                    ref={assetImageInputRef}
+                    className="registry-image-input"
+                    type="file"
+                    accept="image/*"
+                    onChange={handleAssetImageInputChange}
+                  />
+                  <div
+                    className={`registry-image-dropzone${assetImageDragActive ? " is-dragging" : ""}${assetImagePreviewUrl ? " has-image" : ""}`}
+                    onClick={openAssetImagePicker}
+                    onDragOver={handleAssetImageDragOver}
+                    onDragLeave={handleAssetImageDragLeave}
+                    onDrop={handleAssetImageDrop}
+                    onKeyDown={handleAssetImageDropzoneKeydown}
+                    role="button"
+                    tabIndex={0}
+                    aria-label="Upload asset image"
                   >
-                    <option value="open">Open (no verification)</option>
-                    <option value="kyc">KYC</option>
-                    <option value="worldid">World ID</option>
-                    <option value="kyc_worldid">KYC + World ID</option>
-                  </select>
-                </label>
-
-                <label className="full-width">
-                  Notes
-                  <textarea
-                    value={assetDraft.notes}
-                    onChange={(event) => updateDraft("notes", event.target.value)}
-                    placeholder="Issuer notes, legal context, ownership model"
-                    rows={3}
-                  />
-                </label>
+                    {assetImagePreviewUrl ? (
+                      <>
+                        {assetImageFile ? (
+                          <div className="registry-image-overlay">
+                            <span className="hint" title={`${assetImageFile.name} · ${Math.max(1, Math.round(assetImageFile.size / 1024))} KB`}>
+                              {`${assetImageFile.name} · ${Math.max(1, Math.round(assetImageFile.size / 1024))} KB`}
+                            </span>
+                            <button
+                              className="btn"
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                clearAssetImageFile();
+                              }}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        ) : null}
+                        <img src={assetImagePreviewUrl} alt="Asset preview" />
+                      </>
+                    ) : (
+                      <div className="registry-image-dropzone-placeholder">
+                        <strong>Drag & drop image</strong>
+                        <span>or click to choose a file</span>
+                        <span className="registry-image-dropzone-types">PNG / JPG / SVG / WebP</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -5162,34 +5391,13 @@ export default function App() {
                   </div>
                 ))}
               </div>
-              <p className="hint">Use one row per network contract where this asset is listed. Metadata fields above are shared for all rows.</p>
+              <p className="hint">Use one row per network contract where this asset is listed.</p>
               <div className="form-actions">
-                <label className="form-check">
-                  <input
-                    type="checkbox"
-                    checked={createRealIpfsData}
-                    onChange={(event) => setCreateRealIpfsData(event.target.checked)}
-                    disabled={busy || generatingAsset}
-                  />
-                  <span>Create real IPFS data</span>
-                </label>
-                <button className="btn" type="button" onClick={generateAssetDraftFromPreset} disabled={busy || generatingAsset}>
-                  {generatingAsset ? (
-                    <>
-                      <span className="btn-spinner" aria-hidden="true" />
-                      Generating...
-                    </>
-                  ) : (
-                    "Gen Asset"
-                  )}
-                </button>
-                <span className="form-actions-break" aria-hidden="true" />
-                <button className="btn primary" type="submit" disabled={busy || generatingAsset || !account || !verify.ok || !hasActiveKybFlag}>
-                  Add to queue
+                <button className="btn primary" type="submit" disabled={busy || !account || !verify.ok || !hasActiveKybFlag}>
+                  Publish asset
                 </button>
                 <span className="hint">
-                  Queue is wallet-scoped local draft. Use submit actions below to send onchain requests. Next preset: {nextGeneratedPresetName}
-                  {createRealIpfsData ? " · Gen Asset uploads SVG + metadata to Pinata" : ""}
+                  One click flow: upload image + metadata to IPFS, then send onchain requests.
                 </span>
               </div>
             </div>
@@ -5197,190 +5405,47 @@ export default function App() {
         </form>
         </>
         ) : null}
+      </section>
+      ) : null}
 
-        {activeTab === "business" ? (
-        <div className={`queue-wrap registry-block${assetRegistryIntakeLocked ? " registry-intake-disabled" : ""}`}>
+      {activeTab === "business" ? (
+      <section className="card registry-card">
+        <div className="verified-wrap verified-wrap-assets">
           <div className="queue-head">
-            <h3>Queue</h3>
-            <span className={`badge ${registryQueue.length > 0 ? "neutral" : "warn"}`}>{registryQueue.length}</span>
+            <h3>Verified Assets List</h3>
+            <div className="queue-actions">
+              <span className={`badge ${verifiedAssets.length > 0 ? "ok" : "neutral"}`}>{verifiedAssets.length}</span>
+            </div>
           </div>
-          {registryQueue.length === 0 ? (
-            <p className="empty-state">No assets queued yet. Submit your first real asset above.</p>
+
+          {verifiedAssets.length === 0 ? (
+            <p className="empty-state">
+              No verified assets yet. Publish an asset above and wait for CRE to attest it in `AssetRegistry`.
+            </p>
           ) : (
-            <div className="queue-table-wrap">
-              <table className="queue-table">
+            <div className="queue-table-wrap verified-list-table-wrap">
+              <table className="queue-table verified-list-table">
                 <thead>
                   <tr>
-                    <th>Name</th>
+                    <th>Asset</th>
+                    <th>Access</th>
                     <th>Company</th>
-                    <th>Deployments</th>
-                    <th>Status</th>
-                    <th>Actions</th>
+                    <th>Supply</th>
+                    <th>Min Price</th>
+                    <th>Networks</th>
+                    <th>Last verified</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {registryQueue.map((item) => (
-                    <tr key={item.id}>
-                      <td>
-                        <strong>{item.name}</strong>
-                        <div className="table-sub">{new Date(item.createdAt).toLocaleString()}</div>
-                      </td>
-                      <td>
-                        <strong>{item.companyLegalName ?? "-"}</strong>
-                        <div className="table-sub">
-                          {(item.companyRef ?? "-") + " · " + (item.companyJurisdiction ?? "-")}
-                        </div>
-                      </td>
-                      <td>
-                        <div className="queue-deployments">
-                          {item.deployments.map((deployment, deploymentIndex) => (
-                            <div key={`${item.id}-${deploymentIndex}`} className="queue-deployment-item">
-                              <span>{chainName(deployment.chainId)} ({deployment.chainId})</span>
-                              <span>{deployment.tokenStandard}</span>
-                              <span className="mono">{shortAddress(deployment.tokenAddress)}</span>
-                              {deployment.tokenStandard !== "ERC20" ? <span>ID {deployment.tokenId}</span> : null}
-                              {deployment.assetRequestId ? <span>Req #{deployment.assetRequestId}</span> : null}
-                              {deployment.requestTxHash ? <span className="mono">reqTx {shortAddress(deployment.requestTxHash)}</span> : null}
-                              {deployment.verifyTxHash ? <span className="mono">verifyTx {shortAddress(deployment.verifyTxHash)}</span> : null}
-                            </div>
-                          ))}
-                        </div>
-                      </td>
-                      <td>
-                        <span className={`badge ${queueStatusBadgeClass(item.status)}`}>{item.status}</span>
-                        {item.lastError ? <div className="table-sub text-warn">{item.lastError}</div> : null}
-                      </td>
-                      <td>
-                        <div className="queue-row-actions">
-                          <button
-                            className="table-action"
-                            onClick={() => void submitQueuedAsset(item.id)}
-                            disabled={
-                              busy ||
-                              !account ||
-                              item.status === "submitting" ||
-                              item.status === "submitted" ||
-                              item.status === "verified"
-                            }
-                          >
-                            {item.status === "failed" ? "Retry submit" : "Submit"}
-                          </button>
-                          <button className="table-action" onClick={() => removeQueuedAsset(item.id)} disabled={busy || item.status === "submitting"}>
-                            Remove
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          <div className="queue-actions">
-            <button
-              className="btn primary"
-              type="button"
-              onClick={() => void submitAllQueuedAssets()}
-              disabled={busy || !account || !hasActiveKybFlag || !hasKybRequest || latestKybRequestId === "-"}
-            >
-              Submit all to CRE
-            </button>
-            <button
-              className="btn refresh-btn"
-              type="button"
-              onClick={() => void refreshVerifiedAssets()}
-              disabled={busy || refreshingAssets || !account || assetRegistryIntakeLocked}
-              aria-busy={refreshingAssets}
-            >
-              <span className="refresh-btn-label" aria-live="polite">
-                <span className={`refresh-btn-state${refreshingAssets ? " is-hidden" : ""}`} aria-hidden={refreshingAssets}>
-                  Refresh verified
-                </span>
-                <span className={`refresh-btn-state${refreshingAssets ? "" : " is-hidden"}`} aria-hidden={!refreshingAssets}>
-                  <span className="btn-spinner" aria-hidden="true" />
-                  Refreshing...
-                </span>
-              </span>
-            </button>
-          </div>
-        </div>
-        ) : null}
-
-        {activeTab === "assets" || activeTab === "business" ? (
-        <div className="verified-wrap verified-wrap-assets">
-          <div className="queue-head">
-            <h3>Verified Assets</h3>
-            <div className="queue-actions">
-              <div className="assets-scope-toggle" role="group" aria-label="Asset list scope">
-                <button
-                  className={`assets-scope-btn${assetsViewMode === "all" ? " active" : ""}`}
-                  type="button"
-                  onClick={() => setAssetsViewMode("all")}
-                >
-                  All assets
-                </button>
-                <button
-                  className={`assets-scope-btn${assetsViewMode === "mine" ? " active" : ""}`}
-                  type="button"
-                  onClick={() => setAssetsViewMode("mine")}
-                  disabled={!account}
-                  title={!account ? "Connect wallet to view your assets" : "Show assets where you are the owner"}
-                >
-                  Published by me
-                </button>
-              </div>
-              <span className={`badge ${verifiedAssets.length > 0 ? "ok" : "neutral"}`}>{verifiedAssets.length}</span>
-              <button
-                className="btn refresh-btn"
-                type="button"
-                onClick={() => {
-                  setResolvedAssetMetadataByUri({});
-                  refreshAssetsGallery();
-                }}
-                disabled={busy || refreshingAssets || !canReadCurrentAssetsView}
-                aria-busy={refreshingAssets}
-              >
-                <span className="refresh-btn-label" aria-live="polite">
-                  <span className={`refresh-btn-state${refreshingAssets ? " is-hidden" : ""}`} aria-hidden={refreshingAssets}>
-                    Refresh
-                  </span>
-                  <span className={`refresh-btn-state${refreshingAssets ? "" : " is-hidden"}`} aria-hidden={!refreshingAssets}>
-                    <span className="btn-spinner" aria-hidden="true" />
-                    Refreshing...
-                  </span>
-                </span>
-              </button>
-            </div>
-          </div>
-
-          {verifiedAssets.length === 0 && activeTab === "business" ? (
-            <p className="empty-state">
-              {wantsMineAssets
-                ? "No verified assets found for your wallet yet."
-                : "No verified assets yet. Submit queued assets and wait for CRE to attest them in `AssetRegistry`."}
-            </p>
-          ) : (
-            <div className="verified-grid">
               {verifiedAssets.map((asset) => {
                 const metadataPreview = resolvedAssetMetadataByUri[asset.metadataUri];
-                const imageHttpUrl = metadataPreview?.imageHttpUrl || "";
-                const inlineImageDataUrl = metadataPreview?.inlineImageDataUrl || "";
-                const previewImageUrl = inlineImageDataUrl || imageHttpUrl;
-                const imageHttpFallbackUrls = inlineImageDataUrl
-                  ? []
-                  : metadataPreview?.imageHttpFallbackUrls ?? (imageHttpUrl ? [imageHttpUrl] : []);
                 const cardTitle = metadataPreview?.name || asset.name;
                 const cardDescription = metadataPreview?.description || "";
+                const cardMaxSupply = metadataPreview?.maxSupply || "-";
+                const cardMinPrice = metadataPreview?.minPrice || "-";
                 const buyerRequirement =
                   metadataPreview?.buyerVerificationRequirement || asset.buyerVerificationRequirement || "open";
                 const buyerRequirementLabel = buyerVerificationRequirementLabel(buyerRequirement);
-                const canBuyByVerification = buyerVerificationRequirementSatisfied(buyerRequirement, verify.ok, hasActiveWorldIdFlag);
-                const canBuy = Boolean(account) && canBuyByVerification;
-                const buyButtonTitle = !account
-                  ? "Connect wallet to buy"
-                  : canBuy
-                    ? `Buy access: ${buyerRequirementLabel}`
-                    : buyerVerificationRequirementHelpText(buyerRequirement);
                 const cardCompanyProfileFallback =
                   account && asset.owner.toLowerCase() === account.toLowerCase() ? kybCompanyProfile : null;
                 const metadataCompanyLegalName = metadataPreview?.companyLegalName?.trim();
@@ -5405,157 +5470,99 @@ export default function App() {
                 ]
                   .filter(Boolean)
                   .join(" · ");
-
                 return (
-                <article className="verified-card" key={asset.groupId}>
-                  <div className="verified-card-media">
-                    {previewImageUrl ? (
-                      <img
-                        src={previewImageUrl}
-                        alt={cardTitle || "Asset preview"}
-                        loading="lazy"
-                        data-fallback-urls={imageHttpFallbackUrls.join("\n")}
-                        data-fallback-index="0"
-                        onError={handleVerifiedAssetImageError}
-                      />
-                    ) : (
-                      <div className="verified-card-media-placeholder">No preview</div>
-                    )}
-                    <span className="badge ok verified-card-media-badge">Verified</span>
-                  </div>
-
-                  <div className="verified-card-body">
-                  <div className="verified-card-head">
-                    <div className="verified-card-head-copy">
-                      <strong>{cardTitle}</strong>
-                      {cardDescription ? <p className="verified-card-subtitle">{cardDescription}</p> : null}
-                    </div>
-                  </div>
-
-                  <div className="verified-chip-row">
-                    {asset.deployments.map((deployment) => {
-                      const chainLabel = chainName(deployment.chainId);
-                      const explorerUrl = contractExplorerUrl(deployment.chainId, deployment.tokenAddress);
-                      const key = `${asset.groupId}-${deployment.chainId}-${deployment.assetKey}`;
-                      const tooltipContent = (
-                        <span className="verified-network-tooltip" role="tooltip">
-                          <span className="verified-network-tooltip-title">{chainLabel} ({deployment.chainId})</span>
-                          <span className="verified-network-tooltip-grid">
-                            <span>Type</span>
-                            <strong>{deployment.tokenStandard}</strong>
-                            <span>Contract</span>
-                            <strong className="mono" title={deployment.tokenAddress}>{deployment.tokenAddress}</strong>
-                            <span>Token ID</span>
-                            <strong>{deployment.tokenId}</strong>
-                            <span>KYB Req</span>
-                            <strong>#{deployment.kybRequestId}</strong>
-                            <span>Verified</span>
-                            <strong>{formatUnixTimestamp(deployment.verifiedAt)}</strong>
-                          </span>
-                        </span>
-                      );
-
-                      if (explorerUrl) {
+                <tr key={asset.groupId}>
+                  <td className="verified-list-asset-cell">
+                    <strong className="verified-list-asset-title">{cardTitle}</strong>
+                    {cardDescription ? <div className="table-sub verified-list-asset-desc" title={cardDescription}>{cardDescription}</div> : null}
+                    <div className="table-sub mono verified-list-asset-owner" title={asset.owner}>Owner: {shortAddress(asset.owner)}</div>
+                  </td>
+                  <td>
+                    <span className={`pill ${buyerVerificationRequirementBadgeClass(buyerRequirement)}`}>{buyerRequirementLabel}</span>
+                  </td>
+                  <td>
+                    <strong title={companyMeta ? `${companyName} · ${companyMeta}` : companyName}>{companyName}</strong>
+                    {companyMeta ? <div className="table-sub">{companyMeta}</div> : null}
+                    {companySiteUrl ? (
+                      <div className="table-sub">
+                        <a href={companySiteUrl} target="_blank" rel="noreferrer">Site</a>
+                      </div>
+                    ) : null}
+                  </td>
+                  <td>{cardMaxSupply}</td>
+                  <td>{cardMinPrice === "-" ? "-" : `$${cardMinPrice}`}</td>
+                  <td>
+                    <div className="verified-list-network-icons">
+                      {asset.deployments.map((deployment) => {
+                        const networkName = chainName(deployment.chainId);
+                        const networkIconPath = getNetworkIconPath(deployment.chainId);
+                        const explorerUrl = contractExplorerUrl(deployment.chainId, deployment.tokenAddress);
+                        const tooltipLabel = `${networkName} (${deployment.chainId}) · ${deployment.tokenAddress}`;
                         return (
-                          <span className="verified-network-pill-wrap" key={key}>
-                            <a
-                              className="pill ok verified-network-pill"
-                              href={explorerUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              aria-label={`${chainLabel} contract`}
-                            >
-                              {chainLabel}
-                            </a>
-                            {tooltipContent}
+                          <span className="verified-list-network-icon-wrap" key={`${asset.groupId}-${deployment.assetKey}`}>
+                            {explorerUrl ? (
+                              <a
+                                href={explorerUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="assets-catalog-card-network"
+                                title={tooltipLabel}
+                                aria-label={tooltipLabel}
+                              >
+                                <img src={networkIconPath} alt="" width={24} height={24} />
+                              </a>
+                            ) : (
+                              <span className="assets-catalog-card-network" title={tooltipLabel}>
+                                <img src={networkIconPath} alt="" width={24} height={24} />
+                              </span>
+                            )}
                           </span>
                         );
-                      }
-
-                      return (
-                        <span className="verified-network-pill-wrap" key={key}>
-                          <span className="pill ok verified-network-pill" tabIndex={0}>
-                            {chainLabel}
-                          </span>
-                          {tooltipContent}
-                        </span>
-                      );
-                    })}
-                  </div>
-
-                  <div className="verified-card-stats">
-                    <div className="verified-card-stat">
-                      <span>Publisher</span>
-                      <strong className="mono" title={asset.owner}>{shortAddress(asset.owner)}</strong>
+                      })}
                     </div>
-                    <div className="verified-card-stat">
-                      <span>Company</span>
-                      <strong title={companyMeta ? `${companyName} · ${companyMeta}` : companyName}>{companyName}</strong>
-                    </div>
-                    <div className="verified-card-stat">
-                      <span>Last verified</span>
-                      <strong>{formatUnixTimestamp(asset.latestVerifiedAt)}</strong>
-                    </div>
-                  </div>
-
-                  {companyMeta ? <div className="verified-card-submeta">{companyMeta}</div> : null}
-
-                  {showVerifiedCardLinks ? (
-                    <div className="verified-card-links">
-                      {companySiteUrl ? (
-                        <a className="verified-card-link" href={companySiteUrl} target="_blank" rel="noreferrer">
-                          Company Site
-                        </a>
-                      ) : null}
-                      {metadataPreview?.status === "loading" ? <span className="verified-card-meta-status">Loading IPFS metadata…</span> : null}
-                      {metadataPreview?.status === "error" ? <span className="verified-card-meta-status">Metadata unavailable</span> : null}
-                    </div>
-                  ) : null}
-
-                  <div className="verified-card-actions">
-                    <span className={`pill ${buyerVerificationRequirementBadgeClass(buyerRequirement)} verified-buy-pill`}>
-                      Buy access: {buyerRequirementLabel}
-                    </span>
-                    <button
-                      className="btn primary verified-buy-btn"
-                      type="button"
-                      disabled={busy || !canBuy}
-                      title={buyButtonTitle}
-                      onClick={() => setStatus(`Buy flow stub for "${cardTitle || asset.name}" is not implemented yet.`)}
-                    >
-                      Buy
-                    </button>
-                  </div>
-                  </div>
-                </article>
+                  </td>
+                  <td>{formatUnixTimestamp(asset.latestVerifiedAt)}</td>
+                </tr>
                 );
               })}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
-        ) : null}
       </section>
       ) : null}
 
       <section className="status-log card" aria-label="Status log">
         <div className="status-log-head">
           <span className="status-label">Status Log</span>
-          <span className="status-value">{status}</span>
+          <div className="status-log-head-actions">
+            <button
+              type="button"
+              className="btn btn-slim status-log-toggle"
+              onClick={() => setStatusLogVisible((previous) => !previous)}
+            >
+              {statusLogVisible ? "Hide" : "Show"}
+            </button>
+            <span className="status-value">{status}</span>
+          </div>
         </div>
-        <div
-          ref={statusLogRef}
-          className="status-log-list"
-          role="log"
-          aria-live="polite"
-          aria-relevant="additions text"
-        >
-          {statusHistory.map((entry) => (
-            <div key={entry.id} className={`status-log-entry ${entry.level === "error" ? "error" : ""}`}>
-              <span className="status-log-time">[{entry.timestamp}]</span>
-              <span className="status-log-message">{entry.message}</span>
-            </div>
-          ))}
-        </div>
+        {statusLogVisible ? (
+          <div
+            ref={statusLogRef}
+            className="status-log-list"
+            role="log"
+            aria-live="polite"
+            aria-relevant="additions text"
+          >
+            {statusHistory.map((entry) => (
+              <div key={entry.id} className={`status-log-entry ${entry.level === "error" ? "error" : ""}`}>
+                <span className="status-log-time">[{entry.timestamp}]</span>
+                <span className="status-log-message">{entry.message}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </section>
 
       {globalBusy ? (
