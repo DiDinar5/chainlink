@@ -752,6 +752,9 @@ textarea {
   min-width: 0;
   max-width: 100%;
   width: 100%;
+  position: sticky;
+  top: 1rem;
+  align-self: start;
 }
 
 .asset-detail-hero-media {
@@ -1136,6 +1139,11 @@ textarea {
 @media (max-width: 880px) {
   .asset-detail-main {
     grid-template-columns: 1fr;
+  }
+
+  .asset-detail-hero-small {
+    position: relative;
+    top: auto;
   }
 }
 
