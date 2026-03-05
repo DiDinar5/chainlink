@@ -1891,6 +1891,15 @@ export default function App() {
     }
   }, [account, appKitAddress, isAppKitConnected]);
 
+  // Auto-poll verification status every 10 seconds while connected
+  useEffect(() => {
+    if (!account) return;
+    const intervalId = window.setInterval(() => {
+      void refreshOnchainData(account);
+    }, 10_000);
+    return () => window.clearInterval(intervalId);
+  }, [account]);
+
   useEffect(() => {
     if (!account) {
       setKybStubStatus("not_started");
