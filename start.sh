@@ -50,3 +50,4 @@ end tell
 EOF
 
 echo "iTerm2 dev environment launched."
+
