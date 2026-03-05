@@ -305,4 +305,88 @@ describe("PassStore MVP", function () {
         )
     ).to.emit(broker, "AssetVerificationRequested");
   });
+
+  it("additive attestation: attest HUMAN then KYB preserves both flags", async () => {
+    const { user, issuer, registry } = await deployFixture();
+    const now = Math.floor(Date.now() / 1000);
+
+    await (
+      await registry.connect(issuer).attestV2(user.address, {
+        flags: 1n,
+        humanExpiration: BigInt(now + 3600),
+        worldIdExpiration: 0n,
+        kybExpiration: 0n,
+        riskScore: 10,
+        subjectType: 1,
+        refHash: ethers.ZeroHash
+      })
+    ).wait();
+
+    // Attest FLAG_KYB only — should merge with existing FLAG_HUMAN
+    await (
+      await registry.connect(issuer).attestV2(user.address, {
+        flags: 4n,
+        humanExpiration: 0n,
+        worldIdExpiration: 0n,
+        kybExpiration: BigInt(now + 7200),
+        riskScore: 10,
+        subjectType: 1,
+        refHash: ethers.ZeroHash
+      })
+    ).wait();
+
+    const att = await registry.attestations(user.address);
+    expect(att[0]).to.equal(5n); // FLAG_HUMAN | FLAG_KYB = 1 | 4 = 5
+
+    const exps = await registry.verificationExpirations(user.address);
+    expect(exps[0]).to.equal(BigInt(now + 3600));  // humanExpiration preserved
+    expect(exps[2]).to.equal(BigInt(now + 7200));  // kybExpiration set
+
+    const result = await registry.verifyUser(user.address, 1n);
+    expect(result[0]).to.equal(true);
+  });
+
+  it("rejects asset verification with another user's kybRequestId", async () => {
+    const { user, broker } = await deployFixture();
+    const [, , , userB] = await ethers.getSigners();
+
+    // User A sets up KYC + KYB
+    await (await broker.connect(user).setEncryptionPubKey("0x11223344")).wait();
+    await (await broker.connect(user).requestKyc("basic-kyc")).wait();
+    await (await broker.connect(user).requestKyb("acme-inc", "US")).wait();
+    const userAKybId = await broker.latestKybRequestId(user.address);
+
+    // User B sets up KYC + KYB
+    await (await broker.connect(userB).setEncryptionPubKey("0x55667788")).wait();
+    await (await broker.connect(userB).requestKyc("basic-kyc")).wait();
+    await (await broker.connect(userB).requestKyb("other-inc", "UK")).wait();
+
+    // User B tries to use User A's kybRequestId
+    await expect(
+      broker
+        .connect(userB)
+        .requestAssetVerification(
+          userAKybId,
+          11155111n,
+          "0x0000000000000000000000000000000000001111",
+          0n,
+          1,
+          "TOKEN",
+          ethers.id("doc"),
+          "ipfs://doc"
+        )
+    ).to.be.revertedWith("KycSessionBroker: not kyb owner");
+  });
+
+  it("sets kybRequestOwner correctly on requestKyb", async () => {
+    const { user, broker } = await deployFixture();
+
+    await (await broker.connect(user).setEncryptionPubKey("0x11223344")).wait();
+    await (await broker.connect(user).requestKyc("basic-kyc")).wait();
+    await (await broker.connect(user).requestKyb("acme-inc", "US")).wait();
+
+    const kybId = await broker.latestKybRequestId(user.address);
+    const owner = await broker.kybRequestOwner(kybId);
+    expect(owner).to.equal(user.address);
+  });
 });

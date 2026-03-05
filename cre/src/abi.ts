@@ -7,7 +7,8 @@ export const BROKER_ABI = [
   "function encryptionPubKey(address user) view returns (bytes)",
   "function getPacket(uint256 requestId) view returns (address user, bytes ciphertext, uint64 expiresAt, bool consumed, bool exists)",
   "function storeEncryptedToken(uint256 requestId, bytes ciphertext, uint64 expiresAt)",
-  "function requestWorldIdVerification(string proof, string merkleRoot, string nullifierHash, string verificationLevel) returns (uint256 worldIdRequestId)"
+  "function requestWorldIdVerification(string proof, string merkleRoot, string nullifierHash, string verificationLevel) returns (uint256 worldIdRequestId)",
+  "function kybRequestOwner(uint256 kybRequestId) view returns (address)"
 ] as const;
 
 export const REGISTRY_ABI = [

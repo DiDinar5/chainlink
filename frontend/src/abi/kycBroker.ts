@@ -16,5 +16,6 @@ export const kycBrokerAbi = [
   "function latestKybRequestId(address user) view returns (uint256)",
   "function hasKybRequest(address user) view returns (bool)",
   "function getPacket(uint256 requestId) view returns (address user, bytes ciphertext, uint64 expiresAt, bool consumed, bool exists)",
-  "function markConsumed(uint256 requestId)"
+  "function markConsumed(uint256 requestId)",
+  "function kybRequestOwner(uint256 kybRequestId) view returns (address)"
 ] as const;

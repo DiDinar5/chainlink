@@ -400,7 +400,7 @@ async function upsertKybAttestation(user: string, kybRequestId: bigint): Promise
     return { alreadyVerified: true };
   }
 
-  const nextFlags = currentFlags | config.flagHuman | config.flagKyb;
+  const nextFlags = currentFlags | config.flagKyb;
   const fallbackExpiration = now + config.attestationExpirationDays * 24 * 60 * 60;
   const nextKybExpiration = BigInt(Math.max(currentExps.kybExpiration, fallbackExpiration));
   const refHash = ethers.keccak256(
