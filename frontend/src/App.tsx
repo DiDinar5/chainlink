@@ -790,6 +790,46 @@ function shortAddress(address: string): string {
   return `${address.slice(0, 8)}...${address.slice(-6)}`;
 }
 
+function normalizeNonZeroTokenId(tokenId: string | number | bigint | null | undefined): string | null {
+  if (tokenId === null || tokenId === undefined) {
+    return null;
+  }
+  const raw = String(tokenId).trim();
+  if (!raw) {
+    return null;
+  }
+  if (/^\d+$/.test(raw)) {
+    try {
+      return BigInt(raw).toString();
+    } catch {
+      return raw;
+    }
+  }
+  return raw;
+}
+
+function formatTokenIdDisplay(tokenId: string | number | bigint | null | undefined): string {
+  const normalized = normalizeNonZeroTokenId(tokenId);
+  if (!normalized || normalized === "0") {
+    return "–";
+  }
+  return `#${normalized}`;
+}
+
+function collectNonZeroTokenIds(
+  deployments: Array<{ tokenId: string | number | bigint | null | undefined }>
+): string[] {
+  const unique = new Set<string>();
+  for (const deployment of deployments) {
+    unique.add(formatTokenIdDisplay(deployment.tokenId));
+  }
+  return Array.from(unique);
+}
+
+function formatTokenIdSummary(tokenIds: string[]): string {
+  return tokenIds.join(" · ");
+}
+
 function reasonLabel(reason: number): string {
   switch (reason) {
     case 0:
@@ -1631,6 +1671,7 @@ export default function App() {
   const [assetImageDragActive, setAssetImageDragActive] = useState<boolean>(false);
   const [assetImagePreviewUrl, setAssetImagePreviewUrl] = useState<string>("");
   const [verifiedAssets, setVerifiedAssets] = useState<VerifiedAssetCard[]>([]);
+  const [marketVerifiedAssets, setMarketVerifiedAssets] = useState<VerifiedAssetCard[]>([]);
   const [resolvedAssetMetadataByUri, setResolvedAssetMetadataByUri] = useState<Record<string, ResolvedAssetMetadataSnapshot>>({});
   const [refreshingAssets, setRefreshingAssets] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<AppTab>("personal");
@@ -1651,9 +1692,9 @@ export default function App() {
   const [selectedCatalogAsset, setSelectedCatalogAsset] = useState<CatalogAsset | null>(null);
   const [assetDetailTab, setAssetDetailTab] = useState<"price" | "description" | "documents">("description");
   const [assetDetailAmount, setAssetDetailAmount] = useState<string>("1");
-  const [personalCardsView, setPersonalCardsView] = useState<"list" | "grid">("list");
-  const [assetRegistryIntakeVisible, setAssetRegistryIntakeVisible] = useState<boolean>(true);
-  const [statusLogVisible, setStatusLogVisible] = useState<boolean>(true);
+  const [personalCardsView, setPersonalCardsView] = useState<"list" | "grid">("grid");
+  const [assetRegistryIntakeVisible, setAssetRegistryIntakeVisible] = useState<boolean>(false);
+  const [statusLogVisible, setStatusLogVisible] = useState<boolean>(false);
   const { open } = useAppKit();
   const { address: appKitAddress, isConnected: isAppKitConnected } = useAppKitAccount({ namespace: "eip155" });
   const { walletProvider } = useAppKitProvider<WalletProviderLike>("eip155");
@@ -1662,8 +1703,6 @@ export default function App() {
   const worldIdPollNonceRef = useRef<number>(0);
   const kybPollNonceRef = useRef<number>(0);
   const worldIdPendingAddressRef = useRef<string>("");
-  const activeTabRef = useRef<AppTab>("personal");
-  const assetsViewModeRef = useRef<AssetsViewMode>("all");
   const sumsubAutoSyncInFlightRef = useRef<boolean>(false);
   const sumsubAutoSyncCooldownUntilRef = useRef<number>(0);
   const statusLogRef = useRef<HTMLDivElement | null>(null);
@@ -1686,7 +1725,7 @@ export default function App() {
 
   const verifiedCatalogAssets: CatalogAsset[] = useMemo(() => {
     const items: CatalogAsset[] = [];
-    for (const card of verifiedAssets) {
+    for (const card of marketVerifiedAssets) {
       if (card.deployments.length === 0) {
         continue;
       }
@@ -1747,7 +1786,7 @@ export default function App() {
       });
     }
     return items;
-  }, [verifiedAssets, resolvedAssetMetadataByUri]);
+  }, [marketVerifiedAssets, resolvedAssetMetadataByUri]);
 
   const catalogAssetsCombined: CatalogAsset[] = useMemo(
     () => [...verifiedCatalogAssets],
@@ -1757,14 +1796,6 @@ export default function App() {
   useEffect(() => {
     sessionSecretKeyRef.current = sessionSecretKeyHex;
   }, [sessionSecretKeyHex]);
-
-  useEffect(() => {
-    activeTabRef.current = activeTab;
-  }, [activeTab]);
-
-  useEffect(() => {
-    assetsViewModeRef.current = assetsViewMode;
-  }, [assetsViewMode]);
 
   useEffect(() => {
     if (!assetImageFile) {
@@ -1849,7 +1880,13 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const metadataUris = Array.from(new Set(verifiedAssets.map((asset) => asset.metadataUri.trim()).filter(Boolean)));
+    const metadataUris = Array.from(
+      new Set(
+        [...verifiedAssets, ...marketVerifiedAssets]
+          .map((asset) => asset.metadataUri.trim())
+          .filter(Boolean)
+      )
+    );
 
     for (const metadataUri of metadataUris) {
       if (resolvedAssetMetadataByUri[metadataUri]) {
@@ -1897,7 +1934,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [verifiedAssets]);
+  }, [verifiedAssets, marketVerifiedAssets]);
 
   useEffect(() => {
     if (!appKitAddress || !isAppKitConnected) {
@@ -1974,9 +2011,9 @@ export default function App() {
       return;
     }
 
-    setKybStubStatus(readKybStubStatus(account));
-    const storedCompanyProfile = readKybCompanyProfile(account);
-    setKybCompanyProfile(storedCompanyProfile ?? buildStubCompanyProfile(account));
+    // Start from a clean KYB stub state for each connected wallet.
+    setKybStubStatus("not_started");
+    setKybCompanyProfile(buildStubCompanyProfile(account));
   }, [account]);
 
   useEffect(() => {
@@ -1998,9 +2035,9 @@ export default function App() {
       return;
     }
 
-    void refreshVerifiedAssets(account, provider);
+    void refreshVerifiedAssets(account, provider, "owner", "owner");
     const intervalId = window.setInterval(() => {
-      void refreshVerifiedAssets(account, provider);
+      void refreshVerifiedAssets(account, provider, "owner", "owner");
     }, 9000);
 
     return () => {
@@ -2031,9 +2068,19 @@ export default function App() {
     }
 
     const wantsMine = assetsViewMode === "mine" && Boolean(account);
-    void refreshVerifiedAssets(wantsMine ? account : undefined, assetsProvider, wantsMine ? "owner" : "public");
+    void refreshVerifiedAssets(
+      wantsMine ? account : undefined,
+      assetsProvider,
+      wantsMine ? "owner" : "public",
+      "market"
+    );
     const intervalId = window.setInterval(() => {
-      void refreshVerifiedAssets(wantsMine ? account : undefined, assetsProvider, wantsMine ? "owner" : "public");
+      void refreshVerifiedAssets(
+        wantsMine ? account : undefined,
+        assetsProvider,
+        wantsMine ? "owner" : "public",
+        "market"
+      );
     }, 12000);
 
     return () => {
@@ -2042,7 +2089,7 @@ export default function App() {
   }, [activeTab, publicReadProvider, provider, assetsViewMode, account]);
 
   useEffect(() => {
-    if (account) {
+    if (activeTab === "assets") {
       return;
     }
 
@@ -2051,8 +2098,14 @@ export default function App() {
       return;
     }
 
-    void refreshVerifiedAssets(undefined, assetsProvider, "public");
-  }, [account, publicReadProvider, provider]);
+    const wantsMine = assetsViewMode === "mine" && Boolean(account);
+    void refreshVerifiedAssets(
+      wantsMine ? account : undefined,
+      assetsProvider,
+      wantsMine ? "owner" : "public",
+      "market"
+    );
+  }, [activeTab, account, publicReadProvider, provider, assetsViewMode]);
 
   useEffect(() => {
     if (!account || !attestation) {
@@ -2489,10 +2542,10 @@ export default function App() {
       setCreIssuerAllowed(Boolean(allowed));
     }
 
-    // Do not overwrite public Assets catalog with owner-only data while user browses "All assets".
+    // Keep owner-specific list updated for Business tab.
     const shouldRefreshOwnerAssets = activeTab !== "assets" || assetsViewMode === "mine";
     if (shouldRefreshOwnerAssets) {
-      await refreshVerifiedAssets(user, activeProvider, "owner");
+      await refreshVerifiedAssets(user, activeProvider, "owner", "owner");
     }
 
     return {
@@ -2507,7 +2560,8 @@ export default function App() {
   async function refreshVerifiedAssets(
     forAccount?: string,
     providerOverride?: AssetReadProvider,
-    scope: "owner" | "public" = "owner"
+    scope: "owner" | "public" = "owner",
+    target: "owner" | "market" = "owner"
   ): Promise<void> {
     const activeProvider = providerOverride ?? provider ?? publicReadProvider;
     if (!activeProvider) {
@@ -2517,7 +2571,11 @@ export default function App() {
     const requestedUser = (forAccount ?? account).trim().toLowerCase();
     const isPublicScope = scope === "public";
     if (!isPublicScope && !requestedUser) {
-      setVerifiedAssets([]);
+      if (target === "market") {
+        setMarketVerifiedAssets([]);
+      } else {
+        setVerifiedAssets([]);
+      }
       return;
     }
 
@@ -2714,11 +2772,9 @@ export default function App() {
         return right.latestUpdatedAt - left.latestUpdatedAt;
       });
 
-      const ownerResultWouldOverwritePublicCatalog =
-        scope === "owner" &&
-        activeTabRef.current === "assets" &&
-        assetsViewModeRef.current !== "mine";
-      if (!ownerResultWouldOverwritePublicCatalog) {
+      if (target === "market") {
+        setMarketVerifiedAssets(groupedCards);
+      } else {
         setVerifiedAssets(groupedCards);
       }
     } catch (err) {
@@ -3241,18 +3297,6 @@ export default function App() {
     void waitForKybAttestation(account);
   }
 
-  function resetKybStub() {
-    if (!account) {
-      setError("Connect wallet first");
-      return;
-    }
-
-    setError("");
-    setKybStubStatus("not_started");
-    setKybCompanyProfile(buildStubCompanyProfile(account));
-    setStatus("KYB stub reset.");
-  }
-
   function updateDraft<K extends keyof AssetDraft>(field: K, value: AssetDraft[K]) {
     setAssetDraft((previous) => ({ ...previous, [field]: value }));
   }
@@ -3733,6 +3777,13 @@ export default function App() {
   const selectedAssetPublishedLabel = selectedCatalogAsset
     ? (selectedCatalogAsset.publishedAt > 0 ? formatUnixTimestamp(selectedCatalogAsset.publishedAt) : "—")
     : "—";
+  const selectedAssetTokenIds = selectedCatalogAsset
+    ? collectNonZeroTokenIds(selectedCatalogAsset.deployments)
+    : [];
+  const selectedAssetTokenIdSummary =
+    selectedAssetTokenIds.length > 0 ? formatTokenIdSummary(selectedAssetTokenIds) : "";
+  const selectedAssetTokenIdLabel =
+    selectedCatalogAsset && selectedCatalogAsset.deployments.length > 1 ? "Token IDs" : "Token ID";
   const selectedDeploymentsWithLinks = selectedCatalogAsset
     ? selectedCatalogAsset.deployments.map((deployment) => ({
         ...deployment,
@@ -3838,6 +3889,46 @@ export default function App() {
       (_key, rawValue) => (typeof rawValue === "bigint" ? rawValue.toString() : rawValue),
       2
     );
+  const renderIntegrationJson = (value: unknown) => {
+    const json = stringifyIntegrationJson(value);
+    const tokenRegex =
+      /("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(?:\s*:)?|\b-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?\b|\btrue\b|\bfalse\b|\bnull\b)/g;
+    const nodes: Array<JSX.Element | string> = [];
+    let lastIndex = 0;
+    let match = tokenRegex.exec(json);
+    while (match) {
+      const token = match[0];
+      const index = match.index;
+      if (index > lastIndex) {
+        nodes.push(json.slice(lastIndex, index));
+      }
+
+      let className = "integration-json-token-string";
+      if (token.endsWith(":")) {
+        className = "integration-json-token-key";
+      } else if (token === "true" || token === "false") {
+        className = "integration-json-token-boolean";
+      } else if (token === "null") {
+        className = "integration-json-token-null";
+      } else if (/^-?\d/.test(token)) {
+        className = "integration-json-token-number";
+      }
+
+      nodes.push(
+        <span className={className} key={`integration-json-token-${index}`}>
+          {token}
+        </span>
+      );
+      lastIndex = index + token.length;
+      match = tokenRegex.exec(json);
+    }
+
+    if (lastIndex < json.length) {
+      nodes.push(json.slice(lastIndex));
+    }
+
+    return nodes;
+  };
 
   const refreshAssetsGallery = (): void => {
     if (!assetsReadProvider) {
@@ -3845,7 +3936,7 @@ export default function App() {
     }
     const scope = wantsMineAssets ? "owner" : "public";
     const owner = wantsMineAssets ? account : undefined;
-    void refreshVerifiedAssets(owner, assetsReadProvider, scope);
+    void refreshVerifiedAssets(owner, assetsReadProvider, scope, "market");
   };
 
   const normalizeOnchainAssetRegistryRecord = (assetKey: string, record: readonly unknown[]) => {
@@ -4177,13 +4268,30 @@ export default function App() {
     })();
   };
 
+  const clearIntegrationUserResponse = (): void => {
+    setIntegrationUserResponse(null);
+  };
+
+  const clearIntegrationAssetResponse = (): void => {
+    setIntegrationAssetResponse(null);
+  };
+
+  const clearIntegrationAssetsResponse = (): void => {
+    setIntegrationAssetsLoading(false);
+    setIntegrationAssetsRequested(false);
+    setIntegrationAssetsResponse(null);
+  };
+
   return (
     <div className="flow-page">
       <header className="hero-card">
         <div className="hero-copy">
-          <h1>Verified Assets Market</h1>
+          <div className="hero-brand">
+            <img className="hero-brand-logo" src="/l.png" alt="" aria-hidden="true" />
+            <h1>PassLayer</h1>
+          </div>
           <p className="hero-text">
-            Chainlink CRE Hackathon 2026 demo for cross-chain assets that require KYC, World ID, or KYB verification.
+            On-chain compliance layer for tokenized assets — gate access with KYC, World&nbsp;ID, and KYB attestations.
           </p>
         </div>
         <div className="hero-actions">
@@ -4207,30 +4315,30 @@ export default function App() {
       <section className="card section-tabs-card" aria-label="Console sections">
         <div className="section-tabs">
           <button
-            className={`section-tab ${activeTab === "assets" ? "active" : ""}`}
+            className={`section-tab section-tab-primary ${activeTab === "assets" ? "active" : ""}`}
             onClick={() => setActiveTab("assets")}
             aria-pressed={activeTab === "assets"}
             type="button"
           >
-            <span className="section-tab-material-icon material-symbols-rounded" aria-hidden="true">inventory_2</span>
+            <span className="section-tab-material-icon material-symbols-rounded" aria-hidden="true">category</span>
             <span className="section-tab-label">Assets</span>
           </button>
           <button
-            className={`section-tab ${activeTab === "personal" ? "active" : ""}`}
+            className={`section-tab section-tab-primary ${activeTab === "personal" ? "active" : ""}`}
             onClick={() => setActiveTab("personal")}
             aria-pressed={activeTab === "personal"}
             type="button"
           >
-            <span className="section-tab-material-icon material-symbols-rounded" aria-hidden="true">verified_user</span>
+            <span className="section-tab-material-icon material-symbols-rounded" aria-hidden="true">how_to_reg</span>
             <span className="section-tab-label">Personal Verifications</span>
           </button>
           <button
-            className={`section-tab ${activeTab === "business" ? "active" : ""}`}
+            className={`section-tab section-tab-primary ${activeTab === "business" ? "active" : ""}`}
             onClick={() => setActiveTab("business")}
             aria-pressed={activeTab === "business"}
             type="button"
           >
-            <span className="section-tab-material-icon material-symbols-rounded" aria-hidden="true">domain_verification</span>
+            <span className="section-tab-material-icon material-symbols-rounded" aria-hidden="true">business_center</span>
             <span className="section-tab-label">Company Verification</span>
           </button>
           <button
@@ -4239,7 +4347,7 @@ export default function App() {
             aria-pressed={activeTab === "integrations"}
             type="button"
           >
-            <span className="section-tab-material-icon material-symbols-rounded" aria-hidden="true">integration_instructions</span>
+            <span className="section-tab-material-icon material-symbols-rounded" aria-hidden="true">device_hub</span>
             <span className="section-tab-label">Integrations</span>
           </button>
           <button
@@ -4248,7 +4356,7 @@ export default function App() {
             aria-pressed={activeTab === "checkers"}
             type="button"
           >
-            <span className="section-tab-material-icon material-symbols-rounded" aria-hidden="true">fact_check</span>
+            <span className="section-tab-material-icon material-symbols-rounded" aria-hidden="true">manage_search</span>
             <span className="section-tab-label">Checkers</span>
           </button>
         </div>
@@ -4259,7 +4367,7 @@ export default function App() {
         className="tab-section-group integrations-wrap"
         aria-label={activeTab === "integrations" ? "Integrations" : "Checkers"}
       >
-        <div className="queue-head">
+        <div className="queue-head tab-section-head-compact">
           <h3>{activeTab === "integrations" ? "Integrations" : "Checkers"}</h3>
           <div className="queue-actions">
             <span className="badge neutral">No API key</span>
@@ -4279,33 +4387,34 @@ export default function App() {
               Simple on-chain reads for marketplaces that want to display and validate verified assets. Use these public
               reads to check a user, resolve an asset, and list verified assets.
             </p>
-            <ul className="integration-quick-points" aria-label="Integration basics">
-              {integrationQuickPoints.map((point) => (
-                <li key={point}>{point}</li>
-              ))}
-            </ul>
-            <div className="integration-section-label">Read targets</div>
-            <div className="integration-method-target" aria-label="Registry read target">
-              <div className="integration-method-target-grid">
-                <div className="integration-method-target-item">
-                  <span>Network</span>
-                  <code>{integrationRegistryNetworkLabel}</code>
+            <div className="integration-overview-grid" aria-label="Integration basics and read targets">
+              <div className="integration-method-target" aria-label="Registry read target">
+                <div className="integration-method-target-grid">
+                  <div className="integration-method-target-item">
+                    <span>Network</span>
+                    <code>{integrationRegistryNetworkLabel}</code>
+                  </div>
+                  <div className="integration-method-target-item">
+                    <span>Verification Registry (PassRegistry)</span>
+                    <code>{integrationVerificationRegistryContractLabel}</code>
+                  </div>
+                  <div className="integration-method-target-item">
+                    <span>Asset Registry</span>
+                    <code>{integrationAssetRegistryContractLabel}</code>
+                  </div>
                 </div>
-                <div className="integration-method-target-item">
-                  <span>Verification Registry (PassRegistry)</span>
-                  <code>{integrationVerificationRegistryContractLabel}</code>
-                </div>
-                <div className="integration-method-target-item">
-                  <span>Asset Registry</span>
-                  <code>{integrationAssetRegistryContractLabel}</code>
-                </div>
+                <p className="hint integration-method-target-note">
+                  All calls below are read-only (`eth_call`) and free to execute. Your RPC provider may still apply rate
+                  limits.
+                </p>
               </div>
-              <p className="hint integration-method-target-note">
-                All calls below are read-only (`eth_call`) and free to execute. Your RPC provider may still apply rate
-                limits.
-              </p>
+              <ul className="integration-quick-points" aria-label="Integration basics">
+                {integrationQuickPoints.map((point) => (
+                  <li key={point}>{point}</li>
+                ))}
+              </ul>
             </div>
-            <div className="integration-section-label">Common read flows</div>
+            <div className="integration-section-label integration-section-label-flows">Common read flows</div>
             <div className="integration-method-groups" aria-label="Integration method groups">
               {integrationMethodGuide.map((group) => (
                 <section className="integration-method-group" key={group.key}>
@@ -4329,42 +4438,6 @@ export default function App() {
                 </section>
               ))}
             </div>
-          </article>
-          ) : null}
-
-          {activeTab === "checkers" ? (
-          <article className="card integrations-card">
-            <div className="card-head">
-              <h2>Check User Verifications</h2>
-              <span className="badge ok">Onchain</span>
-            </div>
-            <p className="card-text">
-              Query verification status by any wallet address using public reads from the verification registry contract.
-            </p>
-            <div className="integration-input-row">
-              <input
-                className="integration-input"
-                type="text"
-                value={integrationUserQuery}
-                onChange={(event) => setIntegrationUserQuery(event.target.value)}
-                placeholder={account ? `e.g. ${account}` : "0x... wallet address"}
-              />
-              <button
-                className="btn"
-                type="button"
-                onClick={() => void checkIntegrationUserOnchain()}
-                disabled={integrationUserChecking || (!integrationUserQuery.trim() && !account)}
-              >
-                {integrationUserChecking ? "Checking..." : "Check"}
-              </button>
-            </div>
-            {integrationUserResponse ? (
-              <pre className="integration-json">{stringifyIntegrationJson(integrationUserResponse)}</pre>
-            ) : integrationUserChecking ? (
-              <p className="hint">Reading verification status on-chain...</p>
-            ) : (
-              <p className="hint">Enter a wallet address and click `Check`.</p>
-            )}
           </article>
           ) : null}
 
@@ -4423,21 +4496,77 @@ export default function App() {
                 placeholder="tokenId"
                 disabled={integrationAssetTokenStandard === "ERC20"}
               />
-              <button
-                className="btn"
-                type="button"
-                onClick={() => void checkIntegrationAssetOnchain()}
-                disabled={integrationAssetChecking || !canCheckIntegrationAsset}
-              >
-                {integrationAssetChecking ? "Checking..." : "Check"}
-              </button>
+              <div className="integration-inline-actions">
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={() => void checkIntegrationAssetOnchain()}
+                  disabled={integrationAssetChecking || !canCheckIntegrationAsset}
+                >
+                  {integrationAssetChecking ? "Checking..." : "Check"}
+                </button>
+                <button
+                  className="btn btn-slim"
+                  type="button"
+                  onClick={clearIntegrationAssetResponse}
+                  disabled={integrationAssetChecking || !integrationAssetResponse}
+                >
+                  Clear
+                </button>
+              </div>
             </div>
             {integrationAssetResponse ? (
-              <pre className="integration-json">{stringifyIntegrationJson(integrationAssetResponse)}</pre>
+              <pre className="integration-json">{renderIntegrationJson(integrationAssetResponse)}</pre>
             ) : integrationAssetChecking ? (
               <p className="hint">Reading asset record on-chain...</p>
             ) : (
               <p className="hint">Select a source network and contract, then click `Check`.</p>
+            )}
+          </article>
+          ) : null}
+
+          {activeTab === "checkers" ? (
+          <article className="card integrations-card">
+            <div className="card-head">
+              <h2>Check User Verifications</h2>
+              <span className="badge ok">Onchain</span>
+            </div>
+            <p className="card-text">
+              Query verification status by any wallet address using public reads from the verification registry contract.
+            </p>
+            <div className="integration-input-row">
+              <input
+                className="integration-input"
+                type="text"
+                value={integrationUserQuery}
+                onChange={(event) => setIntegrationUserQuery(event.target.value)}
+                placeholder={account ? `e.g. ${account}` : "0x... wallet address"}
+              />
+              <div className="integration-inline-actions">
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={() => void checkIntegrationUserOnchain()}
+                  disabled={integrationUserChecking || (!integrationUserQuery.trim() && !account)}
+                >
+                  {integrationUserChecking ? "Checking..." : "Check"}
+                </button>
+                <button
+                  className="btn btn-slim"
+                  type="button"
+                  onClick={clearIntegrationUserResponse}
+                  disabled={integrationUserChecking || !integrationUserResponse}
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+            {integrationUserResponse ? (
+              <pre className="integration-json">{renderIntegrationJson(integrationUserResponse)}</pre>
+            ) : integrationUserChecking ? (
+              <p className="hint">Reading verification status on-chain...</p>
+            ) : (
+              <p className="hint">Enter a wallet address and click `Check`.</p>
             )}
           </article>
           ) : null}
@@ -4467,6 +4596,14 @@ export default function App() {
                     </span>
                   </span>
                 </button>
+                <button
+                  className="btn btn-slim"
+                  type="button"
+                  onClick={clearIntegrationAssetsResponse}
+                  disabled={integrationAssetsLoading || (!integrationAssetsRequested && !integrationAssetsResponse)}
+                >
+                  Clear
+                </button>
               </div>
             </div>
             {!integrationAssetsRequested ? (
@@ -4474,7 +4611,7 @@ export default function App() {
             ) : integrationAssetsLoading && integrationAssetsCount === 0 ? (
               <p className="empty-state">Loading verified assets from the public registry...</p>
             ) : integrationAssetsResponse ? (
-              <pre className="integration-json">{stringifyIntegrationJson(integrationAssetsResponse)}</pre>
+              <pre className="integration-json">{renderIntegrationJson(integrationAssetsResponse)}</pre>
             ) : (
               <p className="empty-state">No verified assets loaded yet. Click `Refresh` to re-query the public registry.</p>
             )}
@@ -4486,7 +4623,7 @@ export default function App() {
 
       {activeTab === "personal" || activeTab === "business" ? (
       <section className="tab-section-group" aria-label={activeTab === "personal" ? "Personal verifications" : "Company verification"}>
-      <div className="queue-head tab-section-head">
+      <div className={`queue-head tab-section-head${activeTab === "business" ? " tab-section-head-compact" : ""}`}>
         <h3>{activeTab === "personal" ? "Personal Verifications" : "Company Verification"}</h3>
         {activeTab === "personal" ? (
           <div className="personal-view-toggle" role="group" aria-label="Personal verifications layout">
@@ -4508,6 +4645,12 @@ export default function App() {
             >
               <span className="material-symbols-rounded" aria-hidden="true">grid_view</span>
             </button>
+          </div>
+        ) : null}
+        {activeTab === "business" ? (
+          <div className="queue-actions">
+            <span className="card-head-note">KYC Required</span>
+            <span className={`badge ${kybQuickBadgeClass}`}>{kybQuickLabel}</span>
           </div>
         ) : null}
       </div>
@@ -4668,19 +4811,7 @@ export default function App() {
         ) : null}
 
         {activeTab === "business" ? (
-        <article className="card progress-card">
-          <div className="card-head">
-            <h2>KYB</h2>
-            <div className="card-head-badges">
-              <span className="card-head-note">KYC Required</span>
-              <span className={`badge ${kybQuickBadgeClass}`}>{kybQuickLabel}</span>
-            </div>
-          </div>
-
-          <p className="card-text">
-            Required for a company that wants to list a verified asset in the marketplace.
-          </p>
-
+        <article className="card progress-card business-kyb-card">
           <div className="business-verify-grid">
             <div className="kyb-company-box">
               <div className="kyb-company-head">
@@ -4754,9 +4885,6 @@ export default function App() {
                   <button className="btn primary" onClick={runKybAction} disabled={kybActionDisabled}>
                     {kybActionLabel}
                   </button>
-                  <button className="btn danger" onClick={resetKybStub} disabled={busy || !account || kybStubStatus === "not_started"}>
-                    Reset
-                  </button>
                 </div>
 
                 <p className="hint">
@@ -4825,9 +4953,15 @@ export default function App() {
 	                    <dt>Buyer access</dt>
 	                    <dd>{buyerVerificationRequirementLabel(selectedAssetRequirement)}</dd>
 	                  </div>
+                    {selectedAssetTokenIdSummary ? (
+	                  <div>
+	                    <dt>{selectedAssetTokenIdLabel}</dt>
+	                    <dd className="mono asset-detail-break">{selectedAssetTokenIdSummary}</dd>
+	                  </div>
+                    ) : null}
 	                </dl>
 	                <div className="asset-detail-info-grid">
-	                  <div className="asset-detail-info-box">
+	                  <div className="asset-detail-info-box highlight">
 	                    <span className="asset-detail-info-label">Init. Price</span>
 	                    <strong>{selectedCatalogAsset.priceUSDx > 0 ? `$${selectedCatalogAsset.priceUSDx}` : "—"}</strong>
 	                  </div>
@@ -4894,6 +5028,12 @@ export default function App() {
 	                        <dt>Token Type</dt>
 	                        <dd>{Array.from(new Set(selectedCatalogAsset.deployments.map((deployment) => deployment.tokenStandard))).join(" / ") || "—"}</dd>
 	                      </div>
+                        {selectedAssetTokenIdSummary ? (
+	                      <div>
+	                        <dt>{selectedAssetTokenIdLabel}</dt>
+	                        <dd className="mono asset-detail-break">{selectedAssetTokenIdSummary}</dd>
+	                      </div>
+                        ) : null}
 	                      <div>
 	                        <dt>Tokens Issued</dt>
 	                        <dd>{selectedCatalogAsset.supplyForDemo ? selectedCatalogAsset.supplyForDemo.toLocaleString() : "Unlimited"}</dd>
@@ -4956,10 +5096,12 @@ export default function App() {
 	                </div>
 	              </div>
 	              <div className="asset-detail-deployments">
-	                {selectedDeploymentsWithLinks.map((deployment) => (
+	                {selectedDeploymentsWithLinks.map((deployment) => {
+                    const deploymentTokenIdLabel = formatTokenIdDisplay(deployment.tokenId);
+                    return (
 	                  <div className="asset-detail-deployment-row" key={`${deployment.assetKey}:${deployment.chainId}`}>
 	                    <strong>{deployment.networkName}</strong>
-	                    <span>{deployment.tokenStandard}{deployment.tokenStandard === "ERC20" ? "" : ` · #${deployment.tokenId}`}</span>
+	                    <span>{deployment.tokenStandard} · ID: {deploymentTokenIdLabel}</span>
 	                    {deployment.contractExplorer ? (
 	                      <a href={deployment.contractExplorer} target="_blank" rel="noreferrer" className="mono asset-detail-break">
 	                        {deployment.tokenAddress}
@@ -4968,7 +5110,8 @@ export default function App() {
 	                      <span className="mono asset-detail-break">{deployment.tokenAddress}</span>
 	                    )}
 	                  </div>
-	                ))}
+                    );
+                  })}
 	              </div>
 	              <div className="asset-detail-links-block">
 	                <h4>IPFS Gateways</h4>
@@ -5038,6 +5181,9 @@ export default function App() {
                   const publishDateLabel = asset.publishedAt > 0 ? formatUnixTimestamp(asset.publishedAt) : "—";
                   const legalNameLabel = asset.legalName?.trim() || "—";
                   const companyRefLabel = asset.companyRef?.trim() || "—";
+                  const tokenIds = collectNonZeroTokenIds(asset.deployments);
+                  const tokenIdSummary = tokenIds.length > 0 ? formatTokenIdSummary(tokenIds) : "";
+                  const tokenIdLabel = asset.deployments.length > 1 ? "Token IDs" : "Token ID";
                   return (
                     <article
                       key={asset.groupId}
@@ -5066,7 +5212,8 @@ export default function App() {
                             const networkName = chainName(deployment.chainId);
                             const networkIconPath = getNetworkIconPath(deployment.chainId);
                             const explorerUrl = contractExplorerUrl(deployment.chainId, deployment.tokenAddress);
-                            const tooltipLabel = `${networkName} · ${deployment.tokenAddress}`;
+                            const deploymentTokenIdLabel = formatTokenIdDisplay(deployment.tokenId);
+                            const tooltipLabel = `${networkName} · ${deployment.tokenAddress} · ID: ${deploymentTokenIdLabel}`;
                             return (
                               <span className="assets-catalog-card-network-wrap" key={`${asset.groupId}:${deployment.assetKey}`}>
                                 {explorerUrl ? (
@@ -5088,6 +5235,7 @@ export default function App() {
                                 <span className="assets-catalog-card-network-tooltip" role="tooltip">
                                   <strong>{networkName}</strong>
                                   <span className="mono">{deployment.tokenAddress}</span>
+                                  <span className="mono">ID: {deploymentTokenIdLabel}</span>
                                 </span>
                               </span>
                             );
@@ -5110,6 +5258,11 @@ export default function App() {
                           <p className="assets-catalog-card-fact">
                             <strong>Published:</strong> {publishDateLabel}
                           </p>
+                          {tokenIdSummary ? (
+                            <p className="assets-catalog-card-fact">
+                              <strong>{tokenIdLabel}:</strong> <span className="mono">{tokenIdSummary}</span>
+                            </p>
+                          ) : null}
                         </div>
                         <h3 className="assets-catalog-card-title">{asset.name}</h3>
                         <p className="assets-catalog-card-desc">{asset.description || "Description will appear after metadata fetch."}</p>
@@ -5158,21 +5311,25 @@ export default function App() {
       ) : null}
 
       {activeTab === "business" ? (
-      <section className="card registry-card">
+      <section className={`card registry-card business-asset-intake-section${assetRegistryIntakeVisible ? "" : " is-collapsed"}`}>
         {activeTab === "business" ? (
           <>
           <div className="card-head">
-            <h2>Asset Registry Intake</h2>
+            <h2 className="business-section-title">Asset Registry Intake</h2>
             <div className="card-head-badges">
               <span className={`badge ${verify.ok && hasActiveKybFlag ? "ok" : "warn"}`}>
                 {verify.ok && hasActiveKybFlag ? "Ready" : "Locked"}
               </span>
               <button
                 type="button"
-                className="btn btn-slim registry-intake-toggle"
+                className="btn btn-slim registry-intake-toggle section-collapse-toggle"
                 onClick={() => setAssetRegistryIntakeVisible((previous) => !previous)}
+                aria-label={assetRegistryIntakeVisible ? "Hide asset registry intake" : "Show asset registry intake"}
+                title={assetRegistryIntakeVisible ? "Hide asset registry intake" : "Show asset registry intake"}
               >
-                {assetRegistryIntakeVisible ? "Hide" : "Show"}
+                <span className="material-symbols-rounded" aria-hidden="true">
+                  {assetRegistryIntakeVisible ? "expand_less" : "expand_more"}
+                </span>
               </button>
             </div>
           </div>
@@ -5409,10 +5566,10 @@ export default function App() {
       ) : null}
 
       {activeTab === "business" ? (
-      <section className="card registry-card">
+      <section className="card registry-card registry-card-assets business-verified-assets-section">
         <div className="verified-wrap verified-wrap-assets">
           <div className="queue-head">
-            <h3>Verified Assets List</h3>
+            <h2 className="business-section-title">Verified Assets List</h2>
             <div className="queue-actions">
               <span className={`badge ${verifiedAssets.length > 0 ? "ok" : "neutral"}`}>{verifiedAssets.length}</span>
             </div>
@@ -5429,9 +5586,8 @@ export default function App() {
                   <tr>
                     <th>Asset</th>
                     <th>Access</th>
-                    <th>Company</th>
-                    <th>Supply</th>
                     <th>Min Price</th>
+                    <th>Supply</th>
                     <th>Networks</th>
                     <th>Last verified</th>
                   </tr>
@@ -5443,61 +5599,52 @@ export default function App() {
                 const cardDescription = metadataPreview?.description || "";
                 const cardMaxSupply = metadataPreview?.maxSupply || "-";
                 const cardMinPrice = metadataPreview?.minPrice || "-";
+                const cardThumbUrl =
+                  metadataPreview?.inlineImageDataUrl ||
+                  metadataPreview?.imageHttpUrl ||
+                  "";
                 const buyerRequirement =
                   metadataPreview?.buyerVerificationRequirement || asset.buyerVerificationRequirement || "open";
                 const buyerRequirementLabel = buyerVerificationRequirementLabel(buyerRequirement);
-                const cardCompanyProfileFallback =
-                  account && asset.owner.toLowerCase() === account.toLowerCase() ? kybCompanyProfile : null;
-                const metadataCompanyLegalName = metadataPreview?.companyLegalName?.trim();
-                const metadataCompanyRef = metadataPreview?.companyRef?.trim();
-                const metadataCompanyWebsite = metadataPreview?.companyWebsite?.trim();
-                const metadataCompanyJurisdiction = metadataPreview?.companyJurisdiction?.trim();
-                const companyName =
-                  metadataCompanyLegalName ||
-                  asset.companyLegalName?.trim() ||
-                  cardCompanyProfileFallback?.legalName?.trim() ||
-                  "Company unavailable";
-                const companySiteUrl = externalHttpUrl(
-                  metadataCompanyWebsite || asset.companyWebsite || cardCompanyProfileFallback?.website || ""
-                );
-                const showVerifiedCardLinks =
-                  Boolean(companySiteUrl) ||
-                  metadataPreview?.status === "loading" ||
-                  metadataPreview?.status === "error";
-                const companyMeta = [
-                  metadataCompanyRef || asset.companyRef || cardCompanyProfileFallback?.companyRef,
-                  metadataCompanyJurisdiction || asset.companyJurisdiction || cardCompanyProfileFallback?.jurisdiction
-                ]
-                  .filter(Boolean)
-                  .join(" · ");
+                const tokenIds = collectNonZeroTokenIds(asset.deployments);
+                const tokenIdSummary = tokenIds.length > 0 ? formatTokenIdSummary(tokenIds) : "";
+                const tokenIdLabel = asset.deployments.length > 1 ? "Token IDs" : "Token ID";
                 return (
                 <tr key={asset.groupId}>
                   <td className="verified-list-asset-cell">
-                    <strong className="verified-list-asset-title">{cardTitle}</strong>
-                    {cardDescription ? <div className="table-sub verified-list-asset-desc" title={cardDescription}>{cardDescription}</div> : null}
-                    <div className="table-sub mono verified-list-asset-owner" title={asset.owner}>Owner: {shortAddress(asset.owner)}</div>
-                  </td>
-                  <td>
-                    <span className={`pill ${buyerVerificationRequirementBadgeClass(buyerRequirement)}`}>{buyerRequirementLabel}</span>
-                  </td>
-                  <td>
-                    <strong title={companyMeta ? `${companyName} · ${companyMeta}` : companyName}>{companyName}</strong>
-                    {companyMeta ? <div className="table-sub">{companyMeta}</div> : null}
-                    {companySiteUrl ? (
-                      <div className="table-sub">
-                        <a href={companySiteUrl} target="_blank" rel="noreferrer">Site</a>
+                    <div className="verified-list-asset-main">
+                      <span className="verified-list-asset-thumb" aria-hidden="true">
+                        {cardThumbUrl ? (
+                          <img src={cardThumbUrl} alt="" loading="lazy" />
+                        ) : (
+                          <span className="verified-list-asset-thumb-fallback" />
+                        )}
+                      </span>
+                      <div>
+                        <strong className="verified-list-asset-title">{cardTitle}</strong>
+                        {cardDescription ? <div className="table-sub verified-list-asset-desc" title={cardDescription}>{cardDescription}</div> : null}
+                        <div className="table-sub mono verified-list-asset-owner" title={asset.owner}>Owner: {shortAddress(asset.owner)}</div>
+                        {tokenIdSummary ? (
+                          <div className="table-sub mono verified-list-asset-token-id">{tokenIdLabel}: {tokenIdSummary}</div>
+                        ) : null}
                       </div>
-                    ) : null}
+                    </div>
                   </td>
-                  <td>{cardMaxSupply}</td>
+                  <td>
+                    <span className={`pill verified-list-access-pill ${buyerVerificationRequirementBadgeClass(buyerRequirement)}`}>
+                      {buyerRequirementLabel}
+                    </span>
+                  </td>
                   <td>{cardMinPrice === "-" ? "-" : `$${cardMinPrice}`}</td>
+                  <td>{cardMaxSupply}</td>
                   <td>
                     <div className="verified-list-network-icons">
                       {asset.deployments.map((deployment) => {
                         const networkName = chainName(deployment.chainId);
                         const networkIconPath = getNetworkIconPath(deployment.chainId);
                         const explorerUrl = contractExplorerUrl(deployment.chainId, deployment.tokenAddress);
-                        const tooltipLabel = `${networkName} (${deployment.chainId}) · ${deployment.tokenAddress}`;
+                        const deploymentTokenIdLabel = formatTokenIdDisplay(deployment.tokenId);
+                        const tooltipLabel = `${networkName} (${deployment.chainId}) · ${deployment.tokenAddress} · ID: ${deploymentTokenIdLabel}`;
                         return (
                           <span className="verified-list-network-icon-wrap" key={`${asset.groupId}-${deployment.assetKey}`}>
                             {explorerUrl ? (
@@ -5533,18 +5680,22 @@ export default function App() {
       </section>
       ) : null}
 
-      <section className="status-log card" aria-label="Status log">
+      <section className={`status-log card${statusLogVisible ? "" : " is-collapsed"}`} aria-label="Status log">
         <div className="status-log-head">
           <span className="status-label">Status Log</span>
           <div className="status-log-head-actions">
+            <span className="status-value">{status}</span>
             <button
               type="button"
-              className="btn btn-slim status-log-toggle"
+              className="btn btn-slim status-log-toggle section-collapse-toggle"
               onClick={() => setStatusLogVisible((previous) => !previous)}
+              aria-label={statusLogVisible ? "Hide status log" : "Show status log"}
+              title={statusLogVisible ? "Hide status log" : "Show status log"}
             >
-              {statusLogVisible ? "Hide" : "Show"}
+              <span className="material-symbols-rounded" aria-hidden="true">
+                {statusLogVisible ? "expand_less" : "expand_more"}
+              </span>
             </button>
-            <span className="status-value">{status}</span>
           </div>
         </div>
         {statusLogVisible ? (
